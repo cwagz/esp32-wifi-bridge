@@ -43,9 +43,10 @@ static const char *TAG = "wifi-eth-bridge";
 #define NVS_KEY_SSID "ssid"
 #define NVS_KEY_PASSWORD "password"
 
-// WiFi credentials (runtime, loaded from NVS or defaults)
-static char wifi_ssid[33] = WIFI_SSID;
-static char wifi_password[65] = WIFI_PASSWORD;
+// WiFi credentials (runtime, loaded from NVS)
+static char wifi_ssid[33] = "";
+static char wifi_password[65] = "";
+static bool wifi_configured = false;  // True if credentials saved in NVS
 
 // Powerwall connectivity status
 static volatile bool powerwall_reachable = false;
@@ -214,7 +215,7 @@ static esp_netif_t *wifi_netif = NULL;
 static int server_socket = -1;
 
 // OTA HTTP server handle
-static httpd_handle_t ota_server = NULL;
+static httpd_handle_t web_server = NULL;
 
 // ===== Buffer Pool =====
 // Preallocated buffers to avoid malloc/free overhead per connection
@@ -272,14 +273,15 @@ static void release_buffer_pair(int index)
 
 // ===== NVS WiFi Credential Storage =====
 
-/** Load WiFi credentials from NVS */
-static esp_err_t load_wifi_credentials(void)
+/** Load WiFi credentials from NVS - returns true if credentials exist */
+static bool load_wifi_credentials(void)
 {
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(NVS_WIFI_NAMESPACE, NVS_READONLY, &nvs_handle);
     if (err != ESP_OK) {
-        ESP_LOGI(TAG, "No saved WiFi credentials, using defaults");
-        return err;
+        ESP_LOGI(TAG, "No saved WiFi credentials in NVS");
+        wifi_configured = false;
+        return false;
     }
 
     size_t ssid_len = sizeof(wifi_ssid);
@@ -292,16 +294,15 @@ static esp_err_t load_wifi_credentials(void)
 
     nvs_close(nvs_handle);
 
-    if (err == ESP_OK) {
+    if (err == ESP_OK && strlen(wifi_ssid) > 0) {
         ESP_LOGI(TAG, "Loaded WiFi credentials from NVS: SSID=%s", wifi_ssid);
-    } else {
-        // Reset to defaults if load failed
-        strncpy(wifi_ssid, WIFI_SSID, sizeof(wifi_ssid) - 1);
-        strncpy(wifi_password, WIFI_PASSWORD, sizeof(wifi_password) - 1);
-        ESP_LOGW(TAG, "Failed to load WiFi credentials, using defaults");
+        wifi_configured = true;
+        return true;
     }
 
-    return err;
+    ESP_LOGI(TAG, "No valid WiFi credentials found");
+    wifi_configured = false;
+    return false;
 }
 
 /** Save WiFi credentials to NVS */
@@ -1021,6 +1022,11 @@ static esp_err_t wifi_save_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    // Update runtime credentials
+    strncpy(wifi_ssid, new_ssid, sizeof(wifi_ssid) - 1);
+    strncpy(wifi_password, new_password, sizeof(wifi_password) - 1);
+    wifi_configured = true;
+
     // Send success response before reconnecting
     const char *response =
         "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
@@ -1030,14 +1036,14 @@ static esp_err_t wifi_save_handler(httpd_req_t *req)
         ".spinner{width:3rem;height:3rem;border:3px solid #334155;border-top:3px solid #3b82f6;border-radius:50%;animation:spin 1s linear infinite;margin:1rem auto}"
         "@keyframes spin{to{transform:rotate(360deg)}}</style></head>"
         "<body><div class=\"box\"><div class=\"spinner\"></div>"
-        "<h2>Reconnecting WiFi...</h2>"
-        "<p>Connecting to new network. Page will refresh automatically.</p>"
+        "<h2>Connecting to WiFi...</h2>"
+        "<p>Connecting to network. Page will refresh automatically.</p>"
         "</div></body></html>";
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, response, strlen(response));
 
-    // Disconnect and reconnect with new credentials
+    // Configure and connect to WiFi
     vTaskDelay(pdMS_TO_TICKS(500));
 
     esp_wifi_disconnect();
@@ -1050,7 +1056,7 @@ static esp_err_t wifi_save_handler(httpd_req_t *req)
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_connect();
 
-    ESP_LOGI(TAG, "WiFi reconnecting to: %s", new_ssid);
+    ESP_LOGI(TAG, "WiFi connecting to: %s", new_ssid);
     return ESP_OK;
 }
 
@@ -1262,48 +1268,51 @@ static esp_err_t ota_rollback_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/** Start the OTA HTTP server */
-static esp_err_t start_ota_server(void)
+/** Start the HTTP server (port 80) - serves web UI and OTA */
+static esp_err_t start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = OTA_HTTP_PORT;
+    config.server_port = WEB_HTTP_PORT;
     config.stack_size = 8192;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 14;
 
-    esp_err_t err = httpd_start(&ota_server, &config);
+    esp_err_t err = httpd_start(&web_server, &config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start OTA server: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
         return err;
     }
 
-    // Register URI handlers
-    httpd_uri_t ota_status = {
+    // Main status page
+    httpd_uri_t status_page = {
         .uri = "/",
         .method = HTTP_GET,
         .handler = ota_status_handler,
     };
-    httpd_register_uri_handler(ota_server, &ota_status);
+    httpd_register_uri_handler(web_server, &status_page);
 
+    // OTA upload endpoint
     httpd_uri_t ota_upload = {
         .uri = "/ota/upload",
         .method = HTTP_POST,
         .handler = ota_upload_handler,
     };
-    httpd_register_uri_handler(ota_server, &ota_upload);
+    httpd_register_uri_handler(web_server, &ota_upload);
 
+    // OTA rollback endpoint
     httpd_uri_t ota_rollback = {
         .uri = "/ota/rollback",
         .method = HTTP_POST,
         .handler = ota_rollback_handler,
     };
-    httpd_register_uri_handler(ota_server, &ota_rollback);
+    httpd_register_uri_handler(web_server, &ota_rollback);
 
+    // Reboot endpoint
     httpd_uri_t reboot = {
         .uri = "/reboot",
         .method = HTTP_POST,
         .handler = reboot_handler,
     };
-    httpd_register_uri_handler(ota_server, &reboot);
+    httpd_register_uri_handler(web_server, &reboot);
 
     // WiFi configuration endpoints
     httpd_uri_t wifi_scan = {
@@ -1311,48 +1320,45 @@ static esp_err_t start_ota_server(void)
         .method = HTTP_GET,
         .handler = wifi_scan_handler,
     };
-    httpd_register_uri_handler(ota_server, &wifi_scan);
+    httpd_register_uri_handler(web_server, &wifi_scan);
 
     httpd_uri_t wifi_save = {
         .uri = "/wifi/save",
         .method = HTTP_POST,
         .handler = wifi_save_handler,
     };
-    httpd_register_uri_handler(ota_server, &wifi_save);
+    httpd_register_uri_handler(web_server, &wifi_save);
 
-    // API status endpoint
+    // API endpoints
     httpd_uri_t api_status = {
         .uri = "/api/status",
         .method = HTTP_GET,
         .handler = api_status_handler,
     };
-    httpd_register_uri_handler(ota_server, &api_status);
+    httpd_register_uri_handler(web_server, &api_status);
 
-    // API RSSI endpoint (plain text, just the dBm value)
     httpd_uri_t api_rssi = {
         .uri = "/api/rssi",
         .method = HTTP_GET,
         .handler = api_rssi_handler,
     };
-    httpd_register_uri_handler(ota_server, &api_rssi);
+    httpd_register_uri_handler(web_server, &api_rssi);
 
-    // API requests endpoint (JSON array of recent requests)
     httpd_uri_t api_requests = {
         .uri = "/api/requests",
         .method = HTTP_GET,
         .handler = api_requests_handler,
     };
-    httpd_register_uri_handler(ota_server, &api_requests);
+    httpd_register_uri_handler(web_server, &api_requests);
 
-    // API logs endpoint (JSON array of recent logs)
     httpd_uri_t api_logs = {
         .uri = "/api/logs",
         .method = HTTP_GET,
         .handler = api_logs_handler,
     };
-    httpd_register_uri_handler(ota_server, &api_logs);
+    httpd_register_uri_handler(web_server, &api_logs);
 
-    ESP_LOGI(TAG, "OTA server started on port %d", OTA_HTTP_PORT);
+    ESP_LOGI(TAG, "HTTP server started on port %d", WEB_HTTP_PORT);
     return ESP_OK;
 }
 
@@ -1524,15 +1530,13 @@ static esp_err_t init_ethernet(void)
     return ESP_OK;
 }
 
-/** Initialize WiFi Station mode */
+/** Initialize WiFi Station mode - only if credentials are configured */
 static esp_err_t init_wifi(void)
 {
-    ESP_LOGI(TAG, "Initializing WiFi...");
+    // Load saved WiFi credentials from NVS
+    bool has_credentials = load_wifi_credentials();
 
-    // Load saved WiFi credentials from NVS (or use defaults)
-    load_wifi_credentials();
-
-    // Create default WiFi station
+    // Create default WiFi station (needed for scanning even without credentials)
     wifi_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -1541,16 +1545,24 @@ static esp_err_t init_wifi(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_got_ip_handler, NULL));
 
-    wifi_config_t wifi_config = {0};
-    strncpy((char *)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char *)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
-
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi initialized - connecting to %s", wifi_ssid);
+    if (has_credentials) {
+        // Configure and start WiFi with saved credentials
+        wifi_config_t wifi_config = {0};
+        strncpy((char *)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
+        strncpy((char *)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password) - 1);
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        ESP_LOGI(TAG, "WiFi initialized - connecting to %s", wifi_ssid);
+    } else {
+        // Start WiFi without connecting (allows scanning)
+        ESP_ERROR_CHECK(esp_wifi_start());
+        ESP_LOGW(TAG, "WiFi initialized but no credentials configured - use web UI to configure");
+    }
+
     return ESP_OK;
 }
 
@@ -1581,9 +1593,9 @@ static void init_mdns(void)
         {"path", "/"},
         {"wifi_ssid", wifi_ssid},
     };
-    mdns_service_add("Powerwall Bridge", "_http", "_tcp", OTA_HTTP_PORT, http_txt,
+    mdns_service_add("Powerwall Bridge", "_http", "_tcp", WEB_HTTP_PORT, http_txt,
                      sizeof(http_txt) / sizeof(http_txt[0]));
-    ESP_LOGI(TAG, "mDNS service added: _http._tcp on port %d", OTA_HTTP_PORT);
+    ESP_LOGI(TAG, "mDNS service added: _http._tcp on port %d", WEB_HTTP_PORT);
 }
 
 /** WiFi quality monitoring task - periodically logs connection quality */
@@ -2048,6 +2060,16 @@ static void tcp_server_task(void *pvParameters)
 /** Task to initialize WiFi-dependent services after connection */
 static void wifi_services_task(void *pvParameters)
 {
+    // Wait for WiFi credentials to be configured (if not already)
+    if (!wifi_configured) {
+        ESP_LOGW(TAG, "No WiFi credentials configured - waiting for configuration via web UI");
+        while (!wifi_configured) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            ESP_LOGI(TAG, "Waiting for WiFi configuration via web UI at http://<eth-ip>/");
+        }
+        ESP_LOGI(TAG, "WiFi credentials configured - connecting to %s", wifi_ssid);
+    }
+
     // Wait for WiFi connection (with timeout for logging)
     ESP_LOGI(TAG, "Waiting for WiFi connection to %s...", wifi_ssid);
 
@@ -2057,7 +2079,7 @@ static void wifi_services_task(void *pvParameters)
         if (bits & WIFI_CONNECTED_BIT) {
             break;
         }
-        ESP_LOGW(TAG, "WiFi not connected yet - check credentials via OTA UI at http://<eth-ip>:%d/", OTA_HTTP_PORT);
+        ESP_LOGW(TAG, "WiFi not connected yet - check credentials via web UI at http://<eth-ip>/");
     }
 
     ESP_LOGI(TAG, "WiFi connected - starting proxy services");
@@ -2110,10 +2132,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Waiting for Ethernet IP...");
     xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, false, true, portMAX_DELAY);
 
-    // Start OTA HTTP server immediately (on Ethernet interface)
+    // Start HTTP server immediately (on Ethernet interface)
     // This allows WiFi config even if WiFi credentials are wrong
-    start_ota_server();
-    ESP_LOGI(TAG, "OTA server started - http://<eth-ip>:%d/", OTA_HTTP_PORT);
+    start_http_server();
+    ESP_LOGI(TAG, "HTTP server started - http://<eth-ip>/");
 
     // Initialize mDNS on Ethernet (for device discovery, doesn't need WiFi)
     init_mdns();

@@ -51,9 +51,10 @@
 // Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
 
-// ===== OTA Configuration =====
-// HTTP server port for OTA firmware uploads (separate from proxy port)
-#define OTA_HTTP_PORT 8080
+// ===== HTTP Server Configuration =====
+// Web UI port for status page, API, WiFi config
+#define WEB_HTTP_PORT 80
+
 // Maximum firmware size (must match partition size: 0x1C0000 = 1835008 bytes)
 #define OTA_MAX_FIRMWARE_SIZE 0x1C0000
 

@@ -10,6 +10,7 @@
 
 # Configuration
 MDNS_HOSTNAME="powerwall"
+WEB_PORT=80
 OTA_PORT=8080
 FIRMWARE_PATH=".pio/build/esp32-s3-devkitc-1/firmware.bin"
 TIMEOUT=10
@@ -340,16 +341,16 @@ deploy_firmware() {
     local url="http://${ip}:${OTA_PORT}/ota/upload"
     print_status "Uploading firmware to ${url}..."
 
-    # Check if device is reachable
-    if ! curl -s --connect-timeout 5 "http://${ip}:${OTA_PORT}/" > /dev/null; then
-        print_error "Cannot connect to device at ${ip}:${OTA_PORT}"
+    # Check if device is reachable (web UI on port 80)
+    if ! curl -s --connect-timeout 5 "http://${ip}:${WEB_PORT}/" > /dev/null; then
+        print_error "Cannot connect to device at ${ip}:${WEB_PORT}"
         print_error "Make sure the device is powered on and connected to the network"
         exit 1
     fi
 
     # Get current firmware version
     print_status "Current device status:"
-    curl -s "http://${ip}:${OTA_PORT}/" | grep -oE 'Version:</td><td[^>]*>[^<]+' | sed 's/.*>/  Version: /' || true
+    curl -s "http://${ip}:${WEB_PORT}/" | grep -oE 'Version:</td><td[^>]*>[^<]+' | sed 's/.*>/  Version: /' || true
 
     # Upload firmware with progress bar
     local fw_size=$(stat -f%z "$FIRMWARE_PATH" 2>/dev/null || stat -c%s "$FIRMWARE_PATH" 2>/dev/null)
@@ -385,19 +386,19 @@ deploy_firmware() {
         for i in {1..20}; do
             sleep 1
             echo -n "."
-            if curl -s --connect-timeout 2 "http://${ip}:${OTA_PORT}/" > /dev/null 2>&1; then
+            if curl -s --connect-timeout 2 "http://${ip}:${WEB_PORT}/" > /dev/null 2>&1; then
                 echo ""
                 print_success "Device is back online!"
 
                 # Show new version
                 print_status "New device status:"
-                curl -s "http://${ip}:${OTA_PORT}/" | grep -oE 'Version:</td><td[^>]*>[^<]+' | sed 's/.*>/  Version: /' || true
+                curl -s "http://${ip}:${WEB_PORT}/" | grep -oE 'Version:</td><td[^>]*>[^<]+' | sed 's/.*>/  Version: /' || true
                 return 0
             fi
         done
         echo ""
         print_warning "Device hasn't responded yet. It may still be booting."
-        print_status "Try: curl http://${ip}:${OTA_PORT}/"
+        print_status "Try: curl http://${ip}:${WEB_PORT}/"
     else
         print_error "Upload failed (HTTP $http_code)"
         echo "$body" | head -5
