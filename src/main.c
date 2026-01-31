@@ -74,9 +74,25 @@ static SemaphoreHandle_t request_log_mutex = NULL;
 static uint32_t avg_ttfb_ms = 0;
 static uint32_t ttfb_sample_count = 0;
 
+// Cumulative statistics (must be before log_request)
+static int64_t boot_time_us = 0;
+static uint64_t total_bytes_in = 0;
+static uint64_t total_bytes_out = 0;
+static uint32_t total_requests = 0;
+static uint32_t successful_requests = 0;
+static uint32_t failed_requests = 0;
+
 /** Log a completed request/response exchange */
 static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t ttfb_ms, uint16_t ttlb_ms, uint8_t result)
 {
+    // Update cumulative statistics (atomic-safe for single writer)
+    total_requests++;
+    if (result == 0) {
+        successful_requests++;
+    } else {
+        failed_requests++;
+    }
+
     if (!request_log_mutex) return;
     if (xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         request_log_entry_t *entry = &request_log[request_log_index];
@@ -112,6 +128,82 @@ static EventGroupHandle_t s_event_group;
 
 // CPU usage tracking (percentage, 0-100)
 static volatile uint8_t cpu_usage_percent = 0;
+
+// ===== Log Capture Ring Buffer =====
+#define LOG_BUFFER_SIZE 50
+#define LOG_MSG_MAX_LEN 120
+
+typedef struct {
+    int64_t timestamp;      // Seconds since boot
+    uint8_t level;          // ESP_LOG_ERROR=1, WARN=2, INFO=3, DEBUG=4, VERBOSE=5
+    char message[LOG_MSG_MAX_LEN];
+} log_entry_t;
+
+static log_entry_t log_buffer[LOG_BUFFER_SIZE];
+static int log_buffer_index = 0;
+static SemaphoreHandle_t log_mutex = NULL;
+static vprintf_like_t original_vprintf = NULL;
+
+/** Custom log handler to capture logs to ring buffer */
+static int custom_log_vprintf(const char *fmt, va_list args)
+{
+    // Always call original handler first
+    int ret = 0;
+    if (original_vprintf) {
+        va_list args_copy;
+        va_copy(args_copy, args);
+        ret = original_vprintf(fmt, args_copy);
+        va_end(args_copy);
+    }
+
+    // Try to capture log (non-blocking to avoid deadlocks)
+    if (log_mutex && xSemaphoreTake(log_mutex, 0) == pdTRUE) {
+        log_entry_t *entry = &log_buffer[log_buffer_index];
+        entry->timestamp = esp_timer_get_time() / 1000000;
+
+        // Parse log level from format (ESP-IDF format: "X (tag) message")
+        char temp[LOG_MSG_MAX_LEN + 32];
+        va_list args_copy;
+        va_copy(args_copy, args);
+        vsnprintf(temp, sizeof(temp), fmt, args_copy);
+        va_end(args_copy);
+
+        // Determine level from first character
+        entry->level = 3;  // Default INFO
+        if (temp[0] == 'E') entry->level = 1;
+        else if (temp[0] == 'W') entry->level = 2;
+        else if (temp[0] == 'I') entry->level = 3;
+        else if (temp[0] == 'D') entry->level = 4;
+        else if (temp[0] == 'V') entry->level = 5;
+
+        // Copy message, strip trailing newline
+        strncpy(entry->message, temp, LOG_MSG_MAX_LEN - 1);
+        entry->message[LOG_MSG_MAX_LEN - 1] = '\0';
+        size_t len = strlen(entry->message);
+        if (len > 0 && entry->message[len - 1] == '\n') {
+            entry->message[len - 1] = '\0';
+        }
+
+        log_buffer_index = (log_buffer_index + 1) % LOG_BUFFER_SIZE;
+        xSemaphoreGive(log_mutex);
+    }
+
+    return ret;
+}
+
+/** Initialize the log capture system */
+static void init_log_capture(void)
+{
+    log_mutex = xSemaphoreCreateMutex();
+    for (int i = 0; i < LOG_BUFFER_SIZE; i++) {
+        log_buffer[i].timestamp = 0;
+        log_buffer[i].level = 0;
+        log_buffer[i].message[0] = '\0';
+    }
+    // Install custom log handler
+    original_vprintf = esp_log_set_vprintf(custom_log_vprintf);
+    ESP_LOGI(TAG, "Log capture initialized: %d entries", LOG_BUFFER_SIZE);
+}
 
 // Ethernet and WiFi handles
 static esp_eth_handle_t eth_handle = NULL;
@@ -474,6 +566,49 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
         ICON_UPDATE " Reboot</button></form></div>");
 
+    // Statistics card
+    {
+        int64_t uptime_sec = (esp_timer_get_time() - boot_time_us) / 1000000;
+        int days = uptime_sec / 86400;
+        int hours = (uptime_sec % 86400) / 3600;
+        int mins = (uptime_sec % 3600) / 60;
+        int secs = uptime_sec % 60;
+
+        uint32_t success_rate = 0;
+        if (total_requests > 0) {
+            success_rate = (successful_requests * 100) / total_requests;
+        }
+
+        // Format bytes with appropriate unit
+        const char *in_unit = "B", *out_unit = "B";
+        double bytes_in_fmt = total_bytes_in, bytes_out_fmt = total_bytes_out;
+        if (bytes_in_fmt >= 1073741824) { bytes_in_fmt /= 1073741824; in_unit = "GB"; }
+        else if (bytes_in_fmt >= 1048576) { bytes_in_fmt /= 1048576; in_unit = "MB"; }
+        else if (bytes_in_fmt >= 1024) { bytes_in_fmt /= 1024; in_unit = "KB"; }
+        if (bytes_out_fmt >= 1073741824) { bytes_out_fmt /= 1073741824; out_unit = "GB"; }
+        else if (bytes_out_fmt >= 1048576) { bytes_out_fmt /= 1048576; out_unit = "MB"; }
+        else if (bytes_out_fmt >= 1024) { bytes_out_fmt /= 1024; out_unit = "KB"; }
+
+        httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_SWAP " Statistics</h2><div class=\"grid\">");
+        snprintf(buf, sizeof(buf),
+            "<div class=\"status-item\"><div class=\"label\">Uptime</div><div class=\"value\" id=\"uptime\">%dd %dh %dm %ds</div></div>"
+            "<div class=\"status-item\"><div class=\"label\">Requests</div><div class=\"value\" id=\"reqcnt\">%lu</div></div>",
+            days, hours, mins, secs, (unsigned long)total_requests);
+        httpd_resp_sendstr_chunk(req, buf);
+        snprintf(buf, sizeof(buf),
+            "<div class=\"status-item\"><div class=\"label\">Success Rate</div><div class=\"value\" id=\"succrate\" style=\"color:%s\">%lu%%</div></div>"
+            "<div class=\"status-item\"><div class=\"label\">Failed</div><div class=\"value\" id=\"failcnt\" style=\"color:#ef4444\">%lu</div></div>",
+            success_rate >= 90 ? "#22c55e" : success_rate >= 70 ? "#eab308" : "#ef4444",
+            (unsigned long)success_rate, (unsigned long)failed_requests);
+        httpd_resp_sendstr_chunk(req, buf);
+        snprintf(buf, sizeof(buf),
+            "<div class=\"status-item\"><div class=\"label\">Bytes In</div><div class=\"value\" id=\"bytesin\">%.1f %s</div></div>"
+            "<div class=\"status-item\"><div class=\"label\">Bytes Out</div><div class=\"value\" id=\"bytesout\">%.1f %s</div></div>",
+            bytes_in_fmt, in_unit, bytes_out_fmt, out_unit);
+        httpd_resp_sendstr_chunk(req, buf);
+        httpd_resp_sendstr_chunk(req, "</div></div>");
+    }
+
     // Recent requests card with TTFB (IDs for auto-refresh)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"card\"><h2>" ICON_SWAP " Recent Requests</h2>"
@@ -520,6 +655,45 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     httpd_resp_sendstr_chunk(req, "</tbody></table></div>");
 
+    // Log Viewer card
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"card\"><h2>" ICON_MEMORY " System Logs</h2>"
+        "<div style=\"max-height:200px;overflow-y:auto;font-family:monospace;font-size:0.75rem;background:#0f172a;padding:0.5rem;border-radius:0.375rem\" id=\"logview\">");
+
+    if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (int i = 0; i < LOG_BUFFER_SIZE; i++) {
+            int idx = (log_buffer_index - 1 - i + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
+            log_entry_t *e = &log_buffer[idx];
+            if (e->timestamp == 0 && e->message[0] == '\0') continue;
+
+            const char *color = "#94a3b8";  // Default gray
+            if (e->level == 1) color = "#ef4444";       // ERROR - red
+            else if (e->level == 2) color = "#eab308";  // WARN - yellow
+            else if (e->level == 3) color = "#22c55e";  // INFO - green
+            else if (e->level == 4) color = "#94a3b8";  // DEBUG - gray
+
+            // HTML-escape the message
+            char escaped[LOG_MSG_MAX_LEN * 2];
+            char *out = escaped;
+            for (const char *in = e->message; *in && (out - escaped) < (int)sizeof(escaped) - 6; in++) {
+                switch (*in) {
+                    case '<': memcpy(out, "&lt;", 4); out += 4; break;
+                    case '>': memcpy(out, "&gt;", 4); out += 4; break;
+                    case '&': memcpy(out, "&amp;", 5); out += 5; break;
+                    default: *out++ = *in; break;
+                }
+            }
+            *out = '\0';
+
+            snprintf(buf, sizeof(buf),
+                "<div style=\"color:%s;white-space:nowrap\">%s</div>", color, escaped);
+            httpd_resp_sendstr_chunk(req, buf);
+        }
+        xSemaphoreGive(log_mutex);
+    }
+
+    httpd_resp_sendstr_chunk(req, "</div></div>");
+
     // Firmware card (at bottom)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"card\"><h2>" ICON_UPDATE " Firmware</h2><div class=\"grid\">");
@@ -560,21 +734,42 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "}).catch(e=>{s.innerHTML='<option>Scan failed</option>';});}"
         "function sigQ(r){return r>-50?'Excellent':r>-60?'Good':r>-70?'Fair':'Weak';}"
         "function fmtAge(s){return s>=3600?Math.floor(s/3600)+'h':s>=60?Math.floor(s/60)+'m':s+'s';}"
+        "function fmtBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';"
+        "if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}"
+        "function fmtUptime(s){var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60;"
+        "return d+'d '+h+'h '+m+'m '+sec+'s';}"
         "var lastOk=Date.now(),fetching=false;"
         "function updAge(){var s=Math.floor((Date.now()-lastOk)/1000);var el=document.getElementById('lastref');"
         "if(s>30){el.innerHTML='<span style=\"color:#ef4444\">'+s+'s ago (stale)</span>';}else{el.textContent=s+'s ago';}}"
+        "function lvlColor(l){return l==1?'#ef4444':l==2?'#eab308':l==3?'#22c55e':'#94a3b8';}"
+        "function escHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
         "function refresh(){if(fetching)return;fetching=true;"
-        "Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/requests').then(r=>r.json())])"
+        "Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/requests').then(r=>r.json()),fetch('/api/logs').then(r=>r.json())])"
         ".then(function(d){fetching=false;lastOk=Date.now();"
         "var st=d[0],r=st.wifi.rssi,sigEl=document.getElementById('sig');"
         "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';"
         "sigEl.innerHTML='<span style=\"color:'+sc+'\">'+r+' dBm ('+sigQ(r)+')</span>';}else{sigEl.textContent='-';}"
         "document.getElementById('cpu').textContent=st.cpu+'%';"
+        // Update statistics
+        "document.getElementById('uptime').textContent=fmtUptime(st.uptime);"
+        "document.getElementById('reqcnt').textContent=st.total_requests;"
+        "var sr=st.total_requests>0?Math.round(st.successful_requests*100/st.total_requests):0;"
+        "var srEl=document.getElementById('succrate');srEl.textContent=sr+'%';"
+        "srEl.style.color=sr>=90?'#22c55e':sr>=70?'#eab308':'#ef4444';"
+        "document.getElementById('failcnt').textContent=st.failed_requests;"
+        "document.getElementById('bytesin').textContent=fmtBytes(st.total_bytes_in);"
+        "document.getElementById('bytesout').textContent=fmtBytes(st.total_bytes_out);"
+        // Update requests table
         "var req=d[1];document.getElementById('avgttfb').textContent=req.avg_ttfb;"
         "var h='';req.requests.forEach(function(e){"
         "var c=e.ok?'#22c55e':'#ef4444';"
         "h+='<tr><td>'+fmtAge(e.age)+'</td><td>'+e.ip+'</td><td>'+e.in+'/'+e.out+'</td><td>'+e.ttfb+'-'+e.ttlb+'ms</td><td style=\"color:'+c+'\">'+(e.ok?'OK':'ERR')+'</td></tr>';});"
-        "document.getElementById('reqtbl').innerHTML=h;updAge();})"
+        "document.getElementById('reqtbl').innerHTML=h;"
+        // Update logs
+        "var logs=d[2];var lh='';logs.logs.forEach(function(l){"
+        "lh+='<div style=\"color:'+lvlColor(l.lvl)+';white-space:nowrap\">'+escHtml(l.msg)+'</div>';});"
+        "document.getElementById('logview').innerHTML=lh;"
+        "updAge();})"
         ".catch(function(){fetching=false;updAge();});}"
         "setInterval(refresh,5000);setInterval(updAge,1000);refresh();"
         "</script></div></body></html>");
@@ -872,22 +1067,31 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     }
 
     // Check Powerwall
-    int64_t now = esp_timer_get_time() / 1000;
-    if (now - last_powerwall_check > 5000) {
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - last_powerwall_check > 5000) {
         check_powerwall_connectivity();
     }
 
-    char response[300];
+    // Calculate uptime in seconds
+    int64_t uptime_sec = (esp_timer_get_time() - boot_time_us) / 1000000;
+
+    char response[512];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
-        "\"cpu\":%u,\"heap\":%lu}",
+        "\"cpu\":%u,\"heap\":%lu,"
+        "\"uptime\":%lld,"
+        "\"total_bytes_in\":%llu,\"total_bytes_out\":%llu,"
+        "\"total_requests\":%lu,\"successful_requests\":%lu,\"failed_requests\":%lu}",
         wifi_connected ? "true" : "false",
         wifi_ssid, rssi,
         powerwall_reachable ? "true" : "false",
         POWERWALL_IP_STR,
         cpu_usage_percent,
-        (unsigned long)esp_get_free_heap_size());
+        (unsigned long)esp_get_free_heap_size(),
+        (long long)uptime_sec,
+        (unsigned long long)total_bytes_in, (unsigned long long)total_bytes_out,
+        (unsigned long)total_requests, (unsigned long)successful_requests, (unsigned long)failed_requests);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, strlen(response));
@@ -946,6 +1150,54 @@ static esp_err_t api_requests_handler(httpd_req_t *req)
             first = false;
         }
         xSemaphoreGive(request_log_mutex);
+    }
+
+    httpd_resp_sendstr_chunk(req, "]}");
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
+/** API endpoint for system logs */
+static esp_err_t api_logs_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr_chunk(req, "{\"logs\":[");
+
+    if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        bool first = true;
+        char buf[320];
+
+        for (int i = 0; i < LOG_BUFFER_SIZE; i++) {
+            // Read in reverse order (most recent first)
+            int idx = (log_buffer_index - 1 - i + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
+            log_entry_t *e = &log_buffer[idx];
+            if (e->timestamp == 0 && e->message[0] == '\0') continue;
+
+            // Escape special JSON characters in message (limit to 100 chars to fit buffer)
+            char escaped[128];
+            char *out = escaped;
+            for (const char *in = e->message; *in && (out - escaped) < (int)sizeof(escaped) - 6; in++) {
+                switch (*in) {
+                    case '"':  *out++ = '\\'; *out++ = '"'; break;
+                    case '\\': *out++ = '\\'; *out++ = '\\'; break;
+                    case '\n': *out++ = '\\'; *out++ = 'n'; break;
+                    case '\r': *out++ = '\\'; *out++ = 'r'; break;
+                    case '\t': *out++ = '\\'; *out++ = 't'; break;
+                    default:
+                        if ((unsigned char)*in >= 32) *out++ = *in;
+                        break;
+                }
+            }
+            *out = '\0';
+
+            snprintf(buf, sizeof(buf),
+                "%s{\"ts\":%lld,\"lvl\":%u,\"msg\":\"%s\"}",
+                first ? "" : ",",
+                (long long)e->timestamp, e->level, escaped);
+            httpd_resp_sendstr_chunk(req, buf);
+            first = false;
+        }
+        xSemaphoreGive(log_mutex);
     }
 
     httpd_resp_sendstr_chunk(req, "]}");
@@ -1091,6 +1343,14 @@ static esp_err_t start_ota_server(void)
         .handler = api_requests_handler,
     };
     httpd_register_uri_handler(ota_server, &api_requests);
+
+    // API logs endpoint (JSON array of recent logs)
+    httpd_uri_t api_logs = {
+        .uri = "/api/logs",
+        .method = HTTP_GET,
+        .handler = api_logs_handler,
+    };
+    httpd_register_uri_handler(ota_server, &api_logs);
 
     ESP_LOGI(TAG, "OTA server started on port %d", OTA_HTTP_PORT);
     return ESP_OK;
@@ -1294,19 +1554,15 @@ static esp_err_t init_wifi(void)
     return ESP_OK;
 }
 
-/** Initialize mDNS with hostname including MAC suffix */
+/** Initialize mDNS with simple hostname (powerwall.local) */
 static void init_mdns(void)
 {
     ESP_ERROR_CHECK(mdns_init());
 
-    // Generate hostname with last 2 bytes of MAC address (e.g., "powerwall-AB12")
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_ETH);
-    char hostname[32];
-    snprintf(hostname, sizeof(hostname), "%s-%02X%02X", MDNS_HOSTNAME, mac[4], mac[5]);
-
-    ESP_ERROR_CHECK(mdns_hostname_set(hostname));
-    ESP_LOGI(TAG, "mDNS hostname set to: %s.local", hostname);
+    // Use simple hostname for mDNS (powerwall.local) for easy discovery
+    // DHCP hostname keeps the MAC suffix for unique identification
+    ESP_ERROR_CHECK(mdns_hostname_set(MDNS_HOSTNAME));
+    ESP_LOGI(TAG, "mDNS hostname set to: %s.local", MDNS_HOSTNAME);
 
     // Create TXT records with device info (using runtime wifi_ssid)
     mdns_txt_item_t txt_records[] = {
@@ -1629,6 +1885,7 @@ static void handle_client_task(void *pvParameters)
                 
                 last_activity = xTaskGetTickCount();
                 request_bytes_in += len;
+                total_bytes_in += len;
 
                 #if DEBUG_MODE
                 ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
@@ -1684,6 +1941,7 @@ static void handle_client_task(void *pvParameters)
                 
                 last_activity = xTaskGetTickCount();
                 request_bytes_out += len;
+                total_bytes_out += len;
 
                 // Update TTLB (time to last byte) - updated on each chunk
                 TickType_t ttlb_ticks = last_activity - request_start_time;
@@ -1820,6 +2078,12 @@ static void wifi_services_task(void *pvParameters)
 
 void app_main(void)
 {
+    // Record boot time for uptime calculation
+    boot_time_us = esp_timer_get_time();
+
+    // Initialize log capture early to capture startup logs
+    init_log_capture();
+
     ESP_LOGI(TAG, "=== ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge ===");
     ESP_LOGI(TAG, "Mode: SSL Passthrough (no decryption, TTL modification)");
     ESP_LOGI(TAG, "Target: Tesla Powerwall at %s:443", POWERWALL_IP_STR);
