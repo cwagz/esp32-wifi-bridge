@@ -49,7 +49,7 @@ pio run -t upload          # Upload via USB
 ### mDNS Service
 - Hostname: `powerwall.local`
 - Service: `_powerwall._tcp`
-- TXT records: `wifi_ssid`, `target`, `ota_port`
+- TXT records: `wifi_ssid`, `target`, `ota_port`, `version`
 
 ### Deploy Script Features
 - mDNS device discovery (dns-sd on macOS, avahi on Linux)

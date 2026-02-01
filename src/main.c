@@ -1482,11 +1482,15 @@ static void init_mdns(void)
     ESP_ERROR_CHECK(mdns_hostname_set(MDNS_HOSTNAME));
     ESP_LOGI(TAG, "mDNS hostname set to: %s.local", MDNS_HOSTNAME);
 
+    // Get firmware version for TXT records
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+
     // Create TXT records with device info (using runtime wifi_ssid)
     mdns_txt_item_t txt_records[] = {
         {"wifi_ssid", wifi_ssid},
         {"target", POWERWALL_IP_STR},
         {"ota_port", "80"},
+        {"version", app_desc->version},
     };
 
     // Add _powerwall._tcp service for proxy discovery (port 443)
@@ -1494,10 +1498,11 @@ static void init_mdns(void)
                      sizeof(txt_records) / sizeof(txt_records[0]));
     ESP_LOGI(TAG, "mDNS service added: powerwall.%s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
 
-    // Add _http._tcp service for status/OTA web UI (port 8080)
+    // Add _http._tcp service for status/OTA web UI
     mdns_txt_item_t http_txt[] = {
         {"path", "/"},
         {"wifi_ssid", wifi_ssid},
+        {"version", app_desc->version},
     };
     mdns_service_add("Powerwall Bridge", "_http", "_tcp", WEB_HTTP_PORT, http_txt,
                      sizeof(http_txt) / sizeof(http_txt[0]));
