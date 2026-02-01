@@ -1,5 +1,15 @@
 # ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge
 
+## Quick Install
+
+**Flash directly from your browser (no tools required):**
+
+👉 **https://mccahan.github.io/esp32-wifi-bridge/**
+
+Connect your ESP32-S3-POE-ETH board via USB and click "Install". Works with Chrome, Edge, and Opera.
+
+---
+
 This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet SSL bridge that:
 - Accepts SSL/TLS connections on Ethernet (port 443)
 - **Forwards encrypted traffic without decryption** (SSL passthrough)
