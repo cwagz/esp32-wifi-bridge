@@ -47,6 +47,11 @@
 // Interval for logging system metrics (CPU load, etc.) in seconds
 #define SYSTEM_MONITOR_INTERVAL_SEC 30  // Log every 30 seconds
 
+// ===== Connection Watchdog =====
+// Reboot device if no successful proxy connections within this time
+#define WATCHDOG_TIMEOUT_SEC 600  // 10 minutes
+#define WATCHDOG_CHECK_INTERVAL_SEC 60  // Check every minute
+
 // ===== Debug Configuration =====
 // Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging

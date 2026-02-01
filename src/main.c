@@ -86,6 +86,7 @@ static uint64_t total_bytes_out = 0;
 static uint32_t total_requests = 0;
 static uint32_t successful_requests = 0;
 static uint32_t failed_requests = 0;
+static volatile int64_t last_successful_connection_time = 0;  // For connection watchdog
 
 /** Log a completed request/response exchange */
 static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t ttfb_ms, uint16_t ttlb_ms, uint8_t result)
@@ -94,6 +95,7 @@ static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_ou
     total_requests++;
     if (result == 0) {
         successful_requests++;
+        last_successful_connection_time = esp_timer_get_time();  // Update watchdog timestamp
     } else {
         failed_requests++;
     }
@@ -2054,6 +2056,51 @@ static void system_monitor_task(void *pvParameters)
     }
 }
 
+/** Connection watchdog task - reboots if no successful connections for extended period */
+static void connection_watchdog_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Connection watchdog started (timeout: %d seconds)", WATCHDOG_TIMEOUT_SEC);
+
+    // Initialize last successful connection time to boot time
+    // This gives the system time to establish initial connections
+    last_successful_connection_time = esp_timer_get_time();
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_INTERVAL_SEC * 1000));
+
+        // Check if WiFi is connected - only check watchdog when WiFi is up
+        EventBits_t bits = xEventGroupGetBits(s_event_group);
+        if ((bits & WIFI_CONNECTED_BIT) == 0) {
+            // WiFi not connected - don't trigger watchdog, reset timer
+            last_successful_connection_time = esp_timer_get_time();
+            continue;
+        }
+
+        // Check time since last successful connection
+        int64_t now = esp_timer_get_time();
+        int64_t elapsed_sec = (now - last_successful_connection_time) / 1000000;
+
+        if (elapsed_sec > WATCHDOG_TIMEOUT_SEC) {
+            ESP_LOGE(TAG, "Connection watchdog triggered! No successful connections for %lld seconds", (long long)elapsed_sec);
+            ESP_LOGE(TAG, "Stats: total=%lu, success=%lu, failed=%lu",
+                     (unsigned long)total_requests,
+                     (unsigned long)successful_requests,
+                     (unsigned long)failed_requests);
+            ESP_LOGW(TAG, "Rebooting device...");
+
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Give time for logs to flush
+            esp_restart();
+        }
+
+        // Log watchdog status every 5 minutes (every 5th check)
+        static int check_count = 0;
+        check_count++;
+        if (check_count % 5 == 0) {
+            ESP_LOGI(TAG, "Watchdog: Last successful connection %lld seconds ago", (long long)elapsed_sec);
+        }
+    }
+}
+
 /** SSL/TLS Passthrough Proxy task - forwards encrypted packets without decryption */
 static void handle_client_task(void *pvParameters)
 {
@@ -2485,6 +2532,9 @@ void app_main(void)
 
     // Start system monitoring task
     xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
+
+    // Start connection watchdog task
+    xTaskCreate(connection_watchdog_task, "conn_watchdog", 2048, NULL, 3, NULL);
 
     // Start WiFi-dependent services in background task
     // This allows OTA to remain responsive while waiting for WiFi
