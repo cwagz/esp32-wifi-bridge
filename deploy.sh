@@ -11,7 +11,7 @@
 # Configuration
 MDNS_HOSTNAME="powerwall"
 WEB_PORT=80
-OTA_PORT=8080
+OTA_PORT=80
 FIRMWARE_PATH=".pio/build/esp32-s3-devkitc-1/firmware.bin"
 TIMEOUT=10
 
@@ -221,9 +221,10 @@ select_device() {
         IFS='|' read -r ip hostname wifi_ssid target ota_port <<< "$devices"
 
         if is_device_compatible "$wifi_ssid" "$target" "$ota_port"; then
-            print_success "Found device: ${hostname}.local (${ip})"
-            print_status "  WiFi: ${wifi_ssid}"
-            print_status "  Target: ${target}"
+            # Output status to stderr so stdout only contains the IP
+            echo -e "${GREEN}[✓]${NC} Found device: ${hostname}.local (${ip})" >&2
+            echo -e "${BLUE}[*]${NC}   WiFi: ${wifi_ssid}" >&2
+            echo -e "${BLUE}[*]${NC}   Target: ${target}" >&2
             echo "$ip"
             return 0
         else
@@ -342,7 +343,7 @@ deploy_firmware() {
     print_status "Uploading firmware to ${url}..."
 
     # Check if device is reachable (web UI on port 80)
-    if ! curl -s --connect-timeout 5 "http://${ip}:${WEB_PORT}/" > /dev/null; then
+    if ! curl -s --connect-timeout 10 "http://${ip}:${WEB_PORT}/" > /dev/null; then
         print_error "Cannot connect to device at ${ip}:${WEB_PORT}"
         print_error "Make sure the device is powered on and connected to the network"
         exit 1
