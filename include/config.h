@@ -51,6 +51,10 @@
 // Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
 
+// ===== Remote OTA Configuration =====
+// URL to check for firmware updates (GitHub Pages hosted version.json)
+#define REMOTE_OTA_VERSION_URL "https://mccahan.github.io/esp32-wifi-bridge/version.json"
+
 // ===== HTTP Server Configuration =====
 // Web UI port for status page, API, WiFi config
 #define WEB_HTTP_PORT 80

@@ -1,0 +1,112 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build Firmware
+        run: pio run
+
+      - name: Get Version
+        id: version
+        run: echo "version=$(git describe --always --dirty)" >> $GITHUB_OUTPUT
+
+      - name: Prepare Artifacts
+        run: |
+          mkdir release
+          cp .pio/build/esp32-s3-devkitc-1/firmware.bin release/
+          cp .pio/build/esp32-s3-devkitc-1/bootloader.bin release/
+          cp .pio/build/esp32-s3-devkitc-1/partitions.bin release/
+          cp .pio/build/esp32-s3-devkitc-1/ota_data_initial.bin release/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.version.outputs.version }}
+          path: release/
+
+      - name: Prepare GitHub Pages
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # Get version from tag
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Preserve previous version before overwriting
+          PREV_VERSION="none"
+          PREV_SIZE="0"
+          if [ -f docs/firmware.bin ]; then
+            cp docs/firmware.bin docs/firmware-previous.bin
+            if [ -f docs/version.json ]; then
+              PREV_VERSION=$(grep -o '"version"[^,]*' docs/version.json | cut -d'"' -f4 || echo "none")
+              PREV_SIZE=$(stat --printf="%s" docs/firmware-previous.bin 2>/dev/null || echo "0")
+            fi
+          fi
+
+          # Copy new binaries
+          cp release/*.bin docs/
+
+          # Get firmware size
+          SIZE=$(stat --printf="%s" release/firmware.bin)
+
+          # Generate ESP Web Tools manifest
+          cat > docs/manifest.json << EOF
+          {
+            "name": "ESP32 WiFi Bridge",
+            "version": "${VERSION}",
+            "new_install_prompt_erase": true,
+            "builds": [{
+              "chipFamily": "ESP32-S3",
+              "parts": [
+                {"path": "bootloader.bin", "offset": 0},
+                {"path": "partitions.bin", "offset": 32768},
+                {"path": "ota_data_initial.bin", "offset": 61440},
+                {"path": "firmware.bin", "offset": 131072}
+              ]
+            }]
+          }
+          EOF
+
+          # Generate version.json for remote OTA
+          cat > docs/version.json << EOF
+          {
+            "version": "${VERSION}",
+            "size": ${SIZE},
+            "url": "https://mccahan.github.io/esp32-wifi-bridge/firmware.bin",
+            "previous_version": "${PREV_VERSION}",
+            "previous_size": ${PREV_SIZE},
+            "previous_url": "https://mccahan.github.io/esp32-wifi-bridge/firmware-previous.bin"
+          }
+          EOF
+
+      - name: Deploy to GitHub Pages
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          keep_files: true
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

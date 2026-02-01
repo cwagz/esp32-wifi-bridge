@@ -33,6 +33,9 @@
 #include "esp_http_server.h"
 #include "esp_app_format.h"
 #include "esp_timer.h"
+#include "esp_http_client.h"
+#include "esp_https_ota.h"
+#include "esp_crt_bundle.h"
 
 #include "config.h"
 #include "web_ui.h"
@@ -217,6 +220,24 @@ static int server_socket = -1;
 
 // OTA HTTP server handle
 static httpd_handle_t web_server = NULL;
+
+// ===== Remote OTA State =====
+typedef struct {
+    char available_version[32];
+    char download_url[256];
+    uint32_t firmware_size;
+    char previous_version[32];
+    char previous_url[256];
+    uint32_t previous_size;
+    bool update_available;
+    bool previous_available;
+    bool check_in_progress;
+    bool install_in_progress;
+    int64_t last_check_time;
+} remote_ota_state_t;
+
+static remote_ota_state_t remote_ota = {0};
+static SemaphoreHandle_t remote_ota_mutex = NULL;
 
 // ===== Buffer Pool =====
 // Preallocated buffers to avoid malloc/free overhead per connection
