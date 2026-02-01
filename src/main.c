@@ -39,6 +39,8 @@
 
 #include "config.h"
 #include "web_ui.h"
+#include "proxy.h"
+#include "remote_ota.h"
 
 static const char *TAG = "wifi-eth-bridge";
 
@@ -56,76 +58,11 @@ static bool wifi_configured = false;  // True if credentials saved in NVS
 static volatile bool powerwall_reachable = false;
 static volatile int64_t last_powerwall_check = 0;
 
-// ===== Request Log =====
-// Tracks individual request/response exchanges through the proxy
-#define REQUEST_LOG_SIZE 10
-
-typedef struct {
-    int64_t timestamp;      // Seconds since boot
-    uint32_t source_ip;     // Source IP (network byte order)
-    uint32_t bytes_in;      // Request bytes (client -> powerwall)
-    uint32_t bytes_out;     // Response bytes (powerwall -> client)
-    uint16_t ttfb_ms;       // Time to first byte from Powerwall
-    uint16_t ttlb_ms;       // Time to last byte (full response duration)
-    uint8_t result;         // 0=success, 1=timeout, 2=error
-    bool valid;
-} request_log_entry_t;
-
-static request_log_entry_t request_log[REQUEST_LOG_SIZE];
-static int request_log_index = 0;
-static SemaphoreHandle_t request_log_mutex = NULL;
-
-// Running average TTFB (exponential moving average)
-static uint32_t avg_ttfb_ms = 0;
-static uint32_t ttfb_sample_count = 0;
-
-// Cumulative statistics (must be before log_request)
+// Boot time for uptime calculation
 static int64_t boot_time_us = 0;
-static uint64_t total_bytes_in = 0;
-static uint64_t total_bytes_out = 0;
-static uint32_t total_requests = 0;
-static uint32_t successful_requests = 0;
-static uint32_t failed_requests = 0;
-static volatile int64_t last_successful_connection_time = 0;  // For connection watchdog
 
-/** Log a completed request/response exchange */
-static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t ttfb_ms, uint16_t ttlb_ms, uint8_t result)
-{
-    // Update cumulative statistics (atomic-safe for single writer)
-    total_requests++;
-    if (result == 0) {
-        successful_requests++;
-        last_successful_connection_time = esp_timer_get_time();  // Update watchdog timestamp
-    } else {
-        failed_requests++;
-    }
-
-    if (!request_log_mutex) return;
-    if (xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        request_log_entry_t *entry = &request_log[request_log_index];
-        entry->timestamp = esp_timer_get_time() / 1000000;
-        entry->source_ip = source_ip;
-        entry->bytes_in = bytes_in;
-        entry->bytes_out = bytes_out;
-        entry->ttfb_ms = ttfb_ms;
-        entry->ttlb_ms = ttlb_ms;
-        entry->result = result;
-        entry->valid = true;
-        request_log_index = (request_log_index + 1) % REQUEST_LOG_SIZE;
-
-        // Update running average TTFB (exponential moving average, alpha=0.2)
-        if (result == 0 && ttfb_ms > 0) {
-            if (ttfb_sample_count == 0) {
-                avg_ttfb_ms = ttfb_ms;
-            } else {
-                avg_ttfb_ms = (avg_ttfb_ms * 4 + ttfb_ms) / 5;
-            }
-            ttfb_sample_count++;
-        }
-
-        xSemaphoreGive(request_log_mutex);
-    }
-}
+// Connection watchdog timestamp
+static volatile int64_t last_successful_connection_time = 0;
 
 // Event group for WiFi and Ethernet status
 static EventGroupHandle_t s_event_group;
@@ -217,83 +154,8 @@ static esp_eth_handle_t eth_handle = NULL;
 static esp_netif_t *eth_netif = NULL;
 static esp_netif_t *wifi_netif = NULL;
 
-// Server socket
-static int server_socket = -1;
-
 // OTA HTTP server handle
 static httpd_handle_t web_server = NULL;
-
-// ===== Remote OTA State =====
-typedef struct {
-    char available_version[32];
-    char download_url[256];
-    uint32_t firmware_size;
-    char previous_version[32];
-    char previous_url[256];
-    uint32_t previous_size;
-    bool update_available;
-    bool previous_available;
-    bool check_in_progress;
-    bool install_in_progress;
-    int64_t last_check_time;
-} remote_ota_state_t;
-
-static remote_ota_state_t remote_ota = {0};
-static SemaphoreHandle_t remote_ota_mutex = NULL;
-
-// ===== Buffer Pool =====
-// Preallocated buffers to avoid malloc/free overhead per connection
-typedef struct {
-    uint8_t client_buffer[PROXY_BUFFER_SIZE];
-    uint8_t powerwall_buffer[PROXY_BUFFER_SIZE];
-    bool in_use;
-} buffer_pair_t;
-
-static buffer_pair_t buffer_pool[MAX_CONCURRENT_CLIENTS];
-static SemaphoreHandle_t buffer_pool_mutex = NULL;
-
-/** Initialize the buffer pool */
-static void init_buffer_pool(void)
-{
-    buffer_pool_mutex = xSemaphoreCreateMutex();
-    request_log_mutex = xSemaphoreCreateMutex();
-    for (int i = 0; i < MAX_CONCURRENT_CLIENTS; i++) {
-        buffer_pool[i].in_use = false;
-    }
-    for (int i = 0; i < REQUEST_LOG_SIZE; i++) {
-        request_log[i].valid = false;
-    }
-    ESP_LOGI(TAG, "Buffer pool initialized: %d slots, %d bytes each",
-             MAX_CONCURRENT_CLIENTS, PROXY_BUFFER_SIZE * 2);
-}
-
-/** Acquire a buffer pair from the pool. Returns index or -1 if none available */
-static int acquire_buffer_pair(void)
-{
-    int index = -1;
-    if (xSemaphoreTake(buffer_pool_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        for (int i = 0; i < MAX_CONCURRENT_CLIENTS; i++) {
-            if (!buffer_pool[i].in_use) {
-                buffer_pool[i].in_use = true;
-                index = i;
-                break;
-            }
-        }
-        xSemaphoreGive(buffer_pool_mutex);
-    }
-    return index;
-}
-
-/** Release a buffer pair back to the pool */
-static void release_buffer_pair(int index)
-{
-    if (index >= 0 && index < MAX_CONCURRENT_CLIENTS) {
-        if (xSemaphoreTake(buffer_pool_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            buffer_pool[index].in_use = false;
-            xSemaphoreGive(buffer_pool_mutex);
-        }
-    }
-}
 
 // ===== NVS WiFi Credential Storage =====
 
@@ -546,6 +408,10 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     // Statistics card
     {
+        // Get stats from proxy module
+        proxy_stats_t stats;
+        proxy_get_stats(&stats);
+
         int64_t uptime_sec = (esp_timer_get_time() - boot_time_us) / 1000000;
         int days = uptime_sec / 86400;
         int hours = (uptime_sec % 86400) / 3600;
@@ -553,13 +419,13 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         int secs = uptime_sec % 60;
 
         uint32_t success_rate = 0;
-        if (total_requests > 0) {
-            success_rate = (successful_requests * 100) / total_requests;
+        if (stats.total_requests > 0) {
+            success_rate = (stats.successful_requests * 100) / stats.total_requests;
         }
 
         // Format bytes with appropriate unit
         const char *in_unit = "B", *out_unit = "B";
-        double bytes_in_fmt = total_bytes_in, bytes_out_fmt = total_bytes_out;
+        double bytes_in_fmt = stats.total_bytes_in, bytes_out_fmt = stats.total_bytes_out;
         if (bytes_in_fmt >= 1073741824) { bytes_in_fmt /= 1073741824; in_unit = "GB"; }
         else if (bytes_in_fmt >= 1048576) { bytes_in_fmt /= 1048576; in_unit = "MB"; }
         else if (bytes_in_fmt >= 1024) { bytes_in_fmt /= 1024; in_unit = "KB"; }
@@ -571,13 +437,13 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         snprintf(buf, sizeof(buf),
             "<div class=\"status-item\"><div class=\"label\">Uptime</div><div class=\"value\" id=\"uptime\">%dd %dh %dm %ds</div></div>"
             "<div class=\"status-item\"><div class=\"label\">Requests</div><div class=\"value\" id=\"reqcnt\">%lu</div></div>",
-            days, hours, mins, secs, (unsigned long)total_requests);
+            days, hours, mins, secs, (unsigned long)stats.total_requests);
         httpd_resp_sendstr_chunk(req, buf);
         snprintf(buf, sizeof(buf),
             "<div class=\"status-item\"><div class=\"label\">Success Rate</div><div class=\"value\" id=\"succrate\" style=\"color:%s\">%lu%%</div></div>"
             "<div class=\"status-item\"><div class=\"label\">Failed</div><div class=\"value\" id=\"failcnt\" style=\"color:#ef4444\">%lu</div></div>",
             success_rate >= 90 ? "#22c55e" : success_rate >= 70 ? "#eab308" : "#ef4444",
-            (unsigned long)success_rate, (unsigned long)failed_requests);
+            (unsigned long)success_rate, (unsigned long)stats.failed_requests);
         httpd_resp_sendstr_chunk(req, buf);
         snprintf(buf, sizeof(buf),
             "<div class=\"status-item\"><div class=\"label\">Bytes In</div><div class=\"value\" id=\"bytesin\">%.1f %s</div></div>"
@@ -593,7 +459,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<div class=\"flex\" style=\"justify-content:space-between;margin-bottom:0.5rem\">");
     snprintf(buf, sizeof(buf),
         "<span class=\"text-sm text-muted\">Avg TTFB: <span id=\"avgttfb\">%lu</span> ms</span>",
-        (unsigned long)avg_ttfb_ms);
+        (unsigned long)proxy_get_avg_ttfb());
     httpd_resp_sendstr_chunk(req, buf);
     httpd_resp_sendstr_chunk(req,
         "<span class=\"text-xs text-muted\">Updated: <span id=\"lastref\">now</span></span></div>"
@@ -601,13 +467,15 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<tr style=\"color:#94a3b8\"><td>Age</td><td>Source</td><td>Req/Resp</td><td>Response</td><td>Status</td></tr>"
         "<tbody id=\"reqtbl\">");
 
-    if (request_log_mutex && xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // Get request log from proxy module
+    {
+        request_log_entry_t entries[REQUEST_LOG_SIZE];
+        int count = 0;
+        proxy_get_request_log(entries, &count, REQUEST_LOG_SIZE);
+
         int64_t now = esp_timer_get_time() / 1000000;
-        for (int i = 0; i < REQUEST_LOG_SIZE; i++) {
-            // Read in reverse order (most recent first)
-            int idx = (request_log_index - 1 - i + REQUEST_LOG_SIZE) % REQUEST_LOG_SIZE;
-            request_log_entry_t *e = &request_log[idx];
-            if (!e->valid) continue;
+        for (int i = 0; i < count; i++) {
+            request_log_entry_t *e = &entries[i];
 
             int64_t age = now - e->timestamp;
             const char *age_unit = "s";
@@ -628,7 +496,6 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
                 e->ttfb_ms, e->ttlb_ms, color, status);
             httpd_resp_sendstr_chunk(req, buf);
         }
-        xSemaphoreGive(request_log_mutex);
     }
 
     httpd_resp_sendstr_chunk(req, "</tbody></table></div>");
@@ -1023,6 +890,10 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     // Calculate uptime in seconds
     int64_t uptime_sec = (esp_timer_get_time() - boot_time_us) / 1000000;
 
+    // Get proxy stats
+    proxy_stats_t stats;
+    proxy_get_stats(&stats);
+
     char response[512];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
@@ -1038,8 +909,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         cpu_usage_percent,
         (unsigned long)esp_get_free_heap_size(),
         (long long)uptime_sec,
-        (unsigned long long)total_bytes_in, (unsigned long long)total_bytes_out,
-        (unsigned long)total_requests, (unsigned long)successful_requests, (unsigned long)failed_requests);
+        (unsigned long long)stats.total_bytes_in, (unsigned long long)stats.total_bytes_out,
+        (unsigned long)stats.total_requests, (unsigned long)stats.successful_requests, (unsigned long)stats.failed_requests);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, strlen(response));
@@ -1074,30 +945,27 @@ static esp_err_t api_requests_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
 
     char buf[128];
-    snprintf(buf, sizeof(buf), "{\"avg_ttfb\":%lu,\"requests\":[", (unsigned long)avg_ttfb_ms);
+    snprintf(buf, sizeof(buf), "{\"avg_ttfb\":%lu,\"requests\":[", (unsigned long)proxy_get_avg_ttfb());
     httpd_resp_sendstr_chunk(req, buf);
 
-    if (request_log_mutex && xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        int64_t now = esp_timer_get_time() / 1000000;
-        bool first = true;
-        for (int i = 0; i < REQUEST_LOG_SIZE; i++) {
-            int idx = (request_log_index - 1 - i + REQUEST_LOG_SIZE) % REQUEST_LOG_SIZE;
-            request_log_entry_t *e = &request_log[idx];
-            if (!e->valid) continue;
+    // Get request log from proxy module
+    request_log_entry_t entries[REQUEST_LOG_SIZE];
+    int count = 0;
+    proxy_get_request_log(entries, &count, REQUEST_LOG_SIZE);
 
-            int64_t age = now - e->timestamp;
-            uint8_t *ip = (uint8_t *)&e->source_ip;
+    int64_t now = esp_timer_get_time() / 1000000;
+    for (int i = 0; i < count; i++) {
+        request_log_entry_t *e = &entries[i];
+        int64_t age = now - e->timestamp;
+        uint8_t *ip = (uint8_t *)&e->source_ip;
 
-            snprintf(buf, sizeof(buf),
-                "%s{\"age\":%lld,\"ip\":\"%d.%d.%d.%d\",\"in\":%lu,\"out\":%lu,\"ttfb\":%u,\"ttlb\":%u,\"ok\":%d}",
-                first ? "" : ",",
-                (long long)age, ip[0], ip[1], ip[2], ip[3],
-                (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
-                e->ttfb_ms, e->ttlb_ms, e->result == 0 ? 1 : 0);
-            httpd_resp_sendstr_chunk(req, buf);
-            first = false;
-        }
-        xSemaphoreGive(request_log_mutex);
+        snprintf(buf, sizeof(buf),
+            "%s{\"age\":%lld,\"ip\":\"%d.%d.%d.%d\",\"in\":%lu,\"out\":%lu,\"ttfb\":%u,\"ttlb\":%u,\"ok\":%d}",
+            i == 0 ? "" : ",",
+            (long long)age, ip[0], ip[1], ip[2], ip[3],
+            (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
+            e->ttfb_ms, e->ttlb_ms, e->result == 0 ? 1 : 0);
+        httpd_resp_sendstr_chunk(req, buf);
     }
 
     httpd_resp_sendstr_chunk(req, "]}");
@@ -1210,392 +1078,7 @@ static esp_err_t ota_rollback_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// ===== Remote OTA Functions =====
-
-/** Simple JSON string parser - finds value for a key in JSON string */
-static bool json_get_string(const char *json, const char *key, char *value, size_t value_size)
-{
-    char search_key[64];
-    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-
-    char *key_pos = strstr(json, search_key);
-    if (!key_pos) return false;
-
-    char *colon = strchr(key_pos + strlen(search_key), ':');
-    if (!colon) return false;
-
-    // Skip whitespace and find opening quote
-    char *start = colon + 1;
-    while (*start == ' ' || *start == '\t') start++;
-    if (*start != '"') return false;
-    start++;
-
-    // Find closing quote
-    char *end = strchr(start, '"');
-    if (!end) return false;
-
-    size_t len = end - start;
-    if (len >= value_size) len = value_size - 1;
-    strncpy(value, start, len);
-    value[len] = '\0';
-    return true;
-}
-
-/** Simple JSON number parser - finds integer value for a key */
-static bool json_get_int(const char *json, const char *key, uint32_t *value)
-{
-    char search_key[64];
-    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
-
-    char *key_pos = strstr(json, search_key);
-    if (!key_pos) return false;
-
-    char *colon = strchr(key_pos + strlen(search_key), ':');
-    if (!colon) return false;
-
-    *value = strtoul(colon + 1, NULL, 10);
-    return true;
-}
-
-/** Compare version strings (simple: returns 1 if v1 > v2, -1 if v1 < v2, 0 if equal) */
-static int version_compare(const char *v1, const char *v2)
-{
-    // Handle empty or "none" versions
-    if (!v1 || !v2 || strlen(v1) == 0 || strlen(v2) == 0) return 0;
-    if (strcmp(v1, "none") == 0 || strcmp(v2, "none") == 0) return 0;
-
-    return strcmp(v1, v2);
-}
-
-/** Check for remote firmware updates from GitHub (runs as FreeRTOS task) */
-static void check_for_remote_update_task(void *pvParameters)
-{
-    (void)pvParameters;  // Unused
-    if (!remote_ota_mutex) {
-        remote_ota_mutex = xSemaphoreCreateMutex();
-    }
-
-    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        return;
-    }
-
-    if (remote_ota.check_in_progress || remote_ota.install_in_progress) {
-        xSemaphoreGive(remote_ota_mutex);
-        return;
-    }
-
-    remote_ota.check_in_progress = true;
-    xSemaphoreGive(remote_ota_mutex);
-
-    ESP_LOGI(TAG, "Checking for remote firmware update from GitHub via Ethernet...");
-
-    // Get Ethernet interface name to force HTTP traffic through Ethernet (not WiFi)
-    char if_name[8] = {0};
-    if (eth_netif) {
-        esp_netif_get_netif_impl_name(eth_netif, if_name);
-        ESP_LOGI(TAG, "Using interface: %s", if_name);
-    }
-
-    // Configure HTTP client for GitHub (with certificate verification)
-    // Use Ethernet interface since WiFi (Powerwall) has no internet
-    esp_http_client_config_t config = {
-        .url = REMOTE_OTA_VERSION_URL,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 15000,
-        .buffer_size = 1024,
-        .if_name = if_name[0] ? if_name : NULL,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) {
-        ESP_LOGE(TAG, "Failed to init HTTP client for update check");
-        goto cleanup;
-    }
-
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect to GitHub: %s (no internet access?)", esp_err_to_name(err));
-        goto cleanup;
-    }
-
-    int content_length = esp_http_client_fetch_headers(client);
-    if (content_length <= 0 || content_length > 1024) {
-        ESP_LOGE(TAG, "Invalid content length: %d", content_length);
-        goto cleanup;
-    }
-
-    char *buffer = malloc(content_length + 1);
-    if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate buffer for version.json");
-        goto cleanup;
-    }
-
-    int read_len = esp_http_client_read(client, buffer, content_length);
-    if (read_len != content_length) {
-        ESP_LOGE(TAG, "Failed to read version.json: %d/%d", read_len, content_length);
-        free(buffer);
-        goto cleanup;
-    }
-    buffer[read_len] = '\0';
-
-    ESP_LOGI(TAG, "Received version.json: %s", buffer);
-
-    // Parse version.json
-    char version[32] = {0};
-    char url[256] = {0};
-    uint32_t size = 0;
-    char prev_version[32] = {0};
-    char prev_url[256] = {0};
-    uint32_t prev_size = 0;
-
-    if (!json_get_string(buffer, "version", version, sizeof(version))) {
-        ESP_LOGE(TAG, "Failed to parse version from JSON");
-        free(buffer);
-        goto cleanup;
-    }
-
-    json_get_string(buffer, "url", url, sizeof(url));
-    json_get_int(buffer, "size", &size);
-    json_get_string(buffer, "previous_version", prev_version, sizeof(prev_version));
-    json_get_string(buffer, "previous_url", prev_url, sizeof(prev_url));
-    json_get_int(buffer, "previous_size", &prev_size);
-
-    free(buffer);
-
-    // Compare with current version
-    const esp_app_desc_t *app_desc = esp_app_get_description();
-
-    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        strncpy(remote_ota.available_version, version, sizeof(remote_ota.available_version) - 1);
-        strncpy(remote_ota.download_url, url, sizeof(remote_ota.download_url) - 1);
-        remote_ota.firmware_size = size;
-        strncpy(remote_ota.previous_version, prev_version, sizeof(remote_ota.previous_version) - 1);
-        strncpy(remote_ota.previous_url, prev_url, sizeof(remote_ota.previous_url) - 1);
-        remote_ota.previous_size = prev_size;
-        remote_ota.last_check_time = esp_timer_get_time() / 1000000;
-
-        // Update available if remote version is different and newer
-        remote_ota.update_available = (version_compare(version, app_desc->version) != 0);
-        remote_ota.previous_available = (strlen(prev_version) > 0 && strcmp(prev_version, "none") != 0);
-
-        ESP_LOGI(TAG, "Remote version: %s, Current: %s, Update available: %s",
-                 version, app_desc->version, remote_ota.update_available ? "yes" : "no");
-
-        xSemaphoreGive(remote_ota_mutex);
-    }
-
-cleanup:
-    if (client) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-    }
-
-    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        remote_ota.check_in_progress = false;
-        xSemaphoreGive(remote_ota_mutex);
-    }
-
-    vTaskDelete(NULL);  // Task must not return
-}
-
-/** Perform OTA update from remote URL */
-static void perform_remote_ota_task(void *pvParameters)
-{
-    const char *url = (const char *)pvParameters;
-
-    ESP_LOGI(TAG, "Starting remote OTA from: %s", url);
-
-    // Get Ethernet interface name to force download through Ethernet
-    char if_name[8] = {0};
-    if (eth_netif) {
-        esp_netif_get_netif_impl_name(eth_netif, if_name);
-        ESP_LOGI(TAG, "Downloading via interface: %s", if_name);
-    }
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 60000,
-        .buffer_size = 4096,
-        .buffer_size_tx = 1024,
-        .if_name = if_name[0] ? if_name : NULL,
-    };
-
-    esp_https_ota_config_t ota_config = {
-        .http_config = &config,
-    };
-
-    esp_err_t err = esp_https_ota(&ota_config);
-
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Remote OTA successful! Rebooting...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
-    } else {
-        ESP_LOGE(TAG, "Remote OTA failed: %s", esp_err_to_name(err));
-        if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            remote_ota.install_in_progress = false;
-            xSemaphoreGive(remote_ota_mutex);
-        }
-    }
-
-    vTaskDelete(NULL);
-}
-
-/** API endpoint for update status */
-static esp_err_t api_update_status_handler(httpd_req_t *req)
-{
-    const esp_app_desc_t *app_desc = esp_app_get_description();
-
-    char response[512];
-
-    if (remote_ota_mutex && xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        snprintf(response, sizeof(response),
-            "{\"current_version\":\"%s\","
-            "\"available_version\":\"%s\","
-            "\"update_available\":%s,"
-            "\"firmware_size\":%lu,"
-            "\"previous_version\":\"%s\","
-            "\"previous_available\":%s,"
-            "\"check_in_progress\":%s,"
-            "\"install_in_progress\":%s,"
-            "\"last_check\":%lld}",
-            app_desc->version,
-            remote_ota.available_version,
-            remote_ota.update_available ? "true" : "false",
-            (unsigned long)remote_ota.firmware_size,
-            remote_ota.previous_version,
-            remote_ota.previous_available ? "true" : "false",
-            remote_ota.check_in_progress ? "true" : "false",
-            remote_ota.install_in_progress ? "true" : "false",
-            (long long)remote_ota.last_check_time);
-        xSemaphoreGive(remote_ota_mutex);
-    } else {
-        snprintf(response, sizeof(response),
-            "{\"current_version\":\"%s\",\"error\":\"mutex\"}",
-            app_desc->version);
-    }
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, response, strlen(response));
-    return ESP_OK;
-}
-
-/** API endpoint to trigger update check */
-static esp_err_t api_check_update_handler(httpd_req_t *req)
-{
-    // Check in background to avoid blocking
-    xTaskCreate(
-        check_for_remote_update_task,
-        "update_check",
-        4096,
-        NULL,
-        3,
-        NULL
-    );
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"status\":\"checking\"}");
-    return ESP_OK;
-}
-
-/** API endpoint to install update */
-static esp_err_t api_install_update_handler(httpd_req_t *req)
-{
-    if (!remote_ota_mutex) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA not initialized");
-        return ESP_FAIL;
-    }
-
-    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Mutex error");
-        return ESP_FAIL;
-    }
-
-    if (!remote_ota.update_available || strlen(remote_ota.download_url) == 0) {
-        xSemaphoreGive(remote_ota_mutex);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No update available");
-        return ESP_FAIL;
-    }
-
-    if (remote_ota.install_in_progress) {
-        xSemaphoreGive(remote_ota_mutex);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Install already in progress");
-        return ESP_FAIL;
-    }
-
-    remote_ota.install_in_progress = true;
-
-    // Copy URL for task (static buffer since struct lives forever)
-    static char url_copy[256];
-    strncpy(url_copy, remote_ota.download_url, sizeof(url_copy) - 1);
-
-    xSemaphoreGive(remote_ota_mutex);
-
-    // Start OTA in background task
-    xTaskCreate(
-        perform_remote_ota_task,
-        "remote_ota",
-        8192,
-        url_copy,
-        5,
-        NULL
-    );
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"status\":\"installing\"}");
-    return ESP_OK;
-}
-
-/** API endpoint to revert to previous version */
-static esp_err_t api_revert_handler(httpd_req_t *req)
-{
-    if (!remote_ota_mutex) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA not initialized");
-        return ESP_FAIL;
-    }
-
-    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Mutex error");
-        return ESP_FAIL;
-    }
-
-    if (!remote_ota.previous_available || strlen(remote_ota.previous_url) == 0) {
-        xSemaphoreGive(remote_ota_mutex);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No previous version available");
-        return ESP_FAIL;
-    }
-
-    if (remote_ota.install_in_progress) {
-        xSemaphoreGive(remote_ota_mutex);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Install already in progress");
-        return ESP_FAIL;
-    }
-
-    remote_ota.install_in_progress = true;
-
-    // Copy URL for task
-    static char prev_url_copy[256];
-    strncpy(prev_url_copy, remote_ota.previous_url, sizeof(prev_url_copy) - 1);
-
-    xSemaphoreGive(remote_ota_mutex);
-
-    ESP_LOGI(TAG, "Reverting to previous version from: %s", prev_url_copy);
-
-    // Start OTA in background task
-    xTaskCreate(
-        perform_remote_ota_task,
-        "revert_ota",
-        8192,
-        prev_url_copy,
-        5,
-        NULL
-    );
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"status\":\"reverting\"}");
-    return ESP_OK;
-}
+// Remote OTA handlers are in remote_ota.c
 
 /** Start the HTTP server (port 80) - serves web UI and OTA */
 static esp_err_t start_http_server(void)
@@ -2102,11 +1585,13 @@ static void connection_watchdog_task(void *pvParameters)
         int64_t elapsed_sec = (now - last_successful_connection_time) / 1000000;
 
         if (elapsed_sec > WATCHDOG_TIMEOUT_SEC) {
+            proxy_stats_t stats;
+            proxy_get_stats(&stats);
             ESP_LOGE(TAG, "Connection watchdog triggered! No successful connections for %lld seconds", (long long)elapsed_sec);
             ESP_LOGE(TAG, "Stats: total=%lu, success=%lu, failed=%lu",
-                     (unsigned long)total_requests,
-                     (unsigned long)successful_requests,
-                     (unsigned long)failed_requests);
+                     (unsigned long)stats.total_requests,
+                     (unsigned long)stats.successful_requests,
+                     (unsigned long)stats.failed_requests);
             ESP_LOGW(TAG, "Rebooting device...");
 
             vTaskDelay(pdMS_TO_TICKS(1000));  // Give time for logs to flush
@@ -2122,348 +1607,7 @@ static void connection_watchdog_task(void *pvParameters)
     }
 }
 
-/** SSL/TLS Passthrough Proxy task - forwards encrypted packets without decryption */
-static void handle_client_task(void *pvParameters)
-{
-    int client_sock = (int)pvParameters;
-    int buffer_index = -1;
-
-    // Per-request tracking for TTFB/TTLB measurement
-    TickType_t request_start_time = 0;
-    uint32_t request_bytes_in = 0;
-    uint32_t request_bytes_out = 0;
-    bool awaiting_first_byte = false;
-    uint16_t current_ttfb_ms = 0;
-    uint16_t current_ttlb_ms = 0;
-    uint8_t request_result = 0;  // 0=success, 1=timeout, 2=error
-
-    // Get source IP
-    struct sockaddr_in peer_addr;
-    socklen_t peer_len = sizeof(peer_addr);
-    uint32_t source_ip = 0;
-    if (getpeername(client_sock, (struct sockaddr *)&peer_addr, &peer_len) == 0) {
-        source_ip = peer_addr.sin_addr.s_addr;
-    }
-
-    ESP_LOGI(TAG, "Handling client connection (SSL passthrough mode)");
-
-    // Acquire buffer pair from pool (avoids malloc/free overhead)
-    buffer_index = acquire_buffer_pair();
-    if (buffer_index < 0) {
-        ESP_LOGE(TAG, "No buffers available - max concurrent clients (%d) reached", MAX_CONCURRENT_CLIENTS);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Connect to Powerwall via TCP (no TLS, just raw socket)
-    struct sockaddr_in powerwall_addr;
-    powerwall_addr.sin_family = AF_INET;
-    powerwall_addr.sin_port = htons(443);
-    inet_pton(AF_INET, POWERWALL_IP_STR, &powerwall_addr.sin_addr);
-
-    int powerwall_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (powerwall_sock < 0) {
-        ESP_LOGE(TAG, "Failed to create socket to Powerwall");
-        release_buffer_pair(buffer_index);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Set TTL to hide that traffic is coming from outside the network
-    // Common TTL values: 64 (Linux/Unix), 128 (Windows), 255 (Cisco)
-    // Using 64 as it's the most common default
-    int ttl = TTL_VALUE;
-    if (setsockopt(powerwall_sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0) {
-        ESP_LOGW(TAG, "Failed to set TTL on socket: %d", errno);
-    } else {
-        ESP_LOGI(TAG, "Set TTL to %d on outgoing connection", ttl);
-    }
-
-    // Set timeouts on both sockets
-    struct timeval timeout = {.tv_sec = PROXY_TIMEOUT_MS / 1000, .tv_usec = (PROXY_TIMEOUT_MS % 1000) * 1000};
-    if (setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-        ESP_LOGW(TAG, "Failed to set timeout on client socket: %d", errno);
-    }
-    if (setsockopt(powerwall_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-        ESP_LOGW(TAG, "Failed to set timeout on powerwall socket: %d", errno);
-    }
-
-    // Connect to Powerwall
-    if (connect(powerwall_sock, (struct sockaddr *)&powerwall_addr, sizeof(powerwall_addr)) != 0) {
-        ESP_LOGE(TAG, "Failed to connect to Powerwall at %s:443 - error: %d", POWERWALL_IP_STR, errno);
-        release_buffer_pair(buffer_index);
-        close(powerwall_sock);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Disable Nagle's algorithm for lower latency on both sockets
-    int nodelay = 1;
-    setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-    setsockopt(powerwall_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-
-    ESP_LOGI(TAG, "Connected to Powerwall at %s:443 (encrypted passthrough)", POWERWALL_IP_STR);
-
-    // Get buffer pointers from the preallocated pool
-    uint8_t *client_buffer = buffer_pool[buffer_index].client_buffer;
-    uint8_t *powerwall_buffer = buffer_pool[buffer_index].powerwall_buffer;
-
-    // Set both sockets to non-blocking mode for bidirectional forwarding
-    int flags = fcntl(client_sock, F_GETFL, 0);
-    if (flags >= 0) {
-        if (fcntl(client_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-            ESP_LOGW(TAG, "Failed to set client socket to non-blocking mode: %d", errno);
-        }
-    } else {
-        ESP_LOGW(TAG, "Failed to get client socket flags: %d", errno);
-    }
-    
-    flags = fcntl(powerwall_sock, F_GETFL, 0);
-    if (flags >= 0) {
-        if (fcntl(powerwall_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-            ESP_LOGW(TAG, "Failed to set powerwall socket to non-blocking mode: %d", errno);
-        }
-    } else {
-        ESP_LOGW(TAG, "Failed to get powerwall socket flags: %d", errno);
-    }
-
-    TickType_t last_activity = xTaskGetTickCount();
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
-
-    // Bidirectional forwarding loop using select() for efficient I/O multiplexing
-    while (1) {
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(client_sock, &read_fds);
-        FD_SET(powerwall_sock, &read_fds);
-        
-        int max_fd = (client_sock > powerwall_sock) ? client_sock : powerwall_sock;
-        
-        // Use select with a small timeout for activity checking
-        struct timeval select_timeout = {.tv_sec = 0, .tv_usec = 100000}; // 100ms
-        int ready = select(max_fd + 1, &read_fds, NULL, NULL, &select_timeout);
-        
-        if (ready < 0) {
-            ESP_LOGE(TAG, "select() error: %d", errno);
-            break;
-        } else if (ready == 0) {
-            // Timeout - check for inactivity timeout
-            if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
-                ESP_LOGI(TAG, "Connection timeout - no activity for %d ms", PROXY_TIMEOUT_MS);
-                request_result = 1;  // Timeout
-                break;
-            }
-            continue;
-        }
-
-        // Client -> Powerwall: Forward encrypted data
-        if (FD_ISSET(client_sock, &read_fds)) {
-            int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
-            if (len > 0) {
-                // If we were waiting for response and got new request data,
-                // log the previous request/response exchange
-                if (request_bytes_out > 0 && !awaiting_first_byte) {
-                    log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, current_ttlb_ms, request_result);
-                    request_bytes_in = 0;
-                    request_bytes_out = 0;
-                    current_ttfb_ms = 0;
-                    current_ttlb_ms = 0;
-                    request_result = 0;
-                }
-
-                // Start timing new request
-                if (!awaiting_first_byte) {
-                    request_start_time = xTaskGetTickCount();
-                    awaiting_first_byte = true;
-                }
-
-                // Forward encrypted data to Powerwall
-                int total_sent = 0;
-                while (total_sent < len) {
-                    int sent = send(powerwall_sock, client_buffer + total_sent, len - total_sent, 0);
-                    if (sent < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // Wait for socket to become writable using select()
-                            fd_set write_fds;
-                            FD_ZERO(&write_fds);
-                            FD_SET(powerwall_sock, &write_fds);
-                            struct timeval write_timeout = {.tv_sec = 5, .tv_usec = 0};
-                            if (select(powerwall_sock + 1, NULL, &write_fds, NULL, &write_timeout) <= 0) {
-                                ESP_LOGE(TAG, "Timeout waiting for Powerwall socket writability");
-                                goto cleanup;
-                            }
-                            continue;
-                        }
-                        ESP_LOGE(TAG, "Error sending to Powerwall: %d", errno);
-                        goto cleanup;
-                    }
-                    total_sent += sent;
-                }
-                
-                last_activity = xTaskGetTickCount();
-                request_bytes_in += len;
-                total_bytes_in += len;
-
-                #if DEBUG_MODE
-                ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
-                ESP_LOG_BUFFER_HEXDUMP(TAG, client_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
-                #endif
-            } else if (len == 0) {
-                ESP_LOGI(TAG, "Client closed connection");
-                break;
-            } else {
-                ESP_LOGE(TAG, "Error reading from client: %d", errno);
-                request_result = 2;  // Error
-                break;
-            }
-        }
-
-        // Powerwall -> Client: Forward encrypted data
-        if (FD_ISSET(powerwall_sock, &read_fds)) {
-            int len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
-            if (len > 0) {
-                // Calculate TTFB on first response byte
-                if (awaiting_first_byte) {
-                    TickType_t ttfb_ticks = xTaskGetTickCount() - request_start_time;
-                    uint32_t ttfb_ms = ttfb_ticks * portTICK_PERIOD_MS;
-                    current_ttfb_ms = (ttfb_ms > 65535) ? 65535 : ttfb_ms;
-                    awaiting_first_byte = false;
-                    #if DEBUG_MODE
-                    ESP_LOGI(TAG, "TTFB: %u ms", current_ttfb_ms);
-                    #endif
-                }
-                
-                // Forward encrypted data to client
-                int total_sent = 0;
-                while (total_sent < len) {
-                    int sent = send(client_sock, powerwall_buffer + total_sent, len - total_sent, 0);
-                    if (sent < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // Wait for socket to become writable using select()
-                            fd_set write_fds;
-                            FD_ZERO(&write_fds);
-                            FD_SET(client_sock, &write_fds);
-                            struct timeval write_timeout = {.tv_sec = 5, .tv_usec = 0};
-                            if (select(client_sock + 1, NULL, &write_fds, NULL, &write_timeout) <= 0) {
-                                ESP_LOGE(TAG, "Timeout waiting for client socket writability");
-                                goto cleanup;
-                            }
-                            continue;
-                        }
-                        ESP_LOGE(TAG, "Error sending to client: %d", errno);
-                        goto cleanup;
-                    }
-                    total_sent += sent;
-                }
-                
-                last_activity = xTaskGetTickCount();
-                request_bytes_out += len;
-                total_bytes_out += len;
-
-                // Update TTLB (time to last byte) - updated on each chunk
-                TickType_t ttlb_ticks = last_activity - request_start_time;
-                uint32_t ttlb_ms = ttlb_ticks * portTICK_PERIOD_MS;
-                current_ttlb_ms = (ttlb_ms > 65535) ? 65535 : ttlb_ms;
-
-                #if DEBUG_MODE
-                ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
-                ESP_LOG_BUFFER_HEXDUMP(TAG, powerwall_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
-                #endif
-            } else if (len == 0) {
-                ESP_LOGI(TAG, "Powerwall closed connection");
-                break;
-            } else {
-                ESP_LOGE(TAG, "Error reading from Powerwall: %d", errno);
-                request_result = 2;  // Error
-                break;
-            }
-        }
-    }
-
-cleanup:
-    // Log final request if any data was exchanged
-    if (request_bytes_in > 0 || request_bytes_out > 0) {
-        log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, current_ttlb_ms, request_result);
-    }
-
-    release_buffer_pair(buffer_index);
-    close(powerwall_sock);
-    close(client_sock);
-
-    ESP_LOGI(TAG, "Client connection closed (passthrough mode)");
-    vTaskDelete(NULL);
-}
-
-/** TCP Server task */
-static void tcp_server_task(void *pvParameters)
-{
-    // Wait for Ethernet to get IP
-    ESP_LOGI(TAG, "Waiting for Ethernet IP...");
-    xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, false, true, portMAX_DELAY);
-
-    // Create server socket
-    server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (server_socket < 0) {
-        ESP_LOGE(TAG, "Unable to create socket");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int opt = 1;
-    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PROXY_PORT);
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
-        ESP_LOGE(TAG, "Socket bind failed");
-        close(server_socket);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    if (listen(server_socket, 3) != 0) {
-        ESP_LOGE(TAG, "Socket listen failed");
-        close(server_socket);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "TCP Server (SSL passthrough) listening on port %d", PROXY_PORT);
-    ESP_LOGI(TAG, "Ready to forward encrypted SSL/TLS traffic to Powerwall (%s:443) with TTL modification", POWERWALL_IP_STR);
-
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-
-        int client_sock = accept(server_socket, (struct sockaddr *)&client_addr, &client_len);
-        if (client_sock < 0) {
-            ESP_LOGE(TAG, "Unable to accept connection");
-            continue;
-        }
-
-        char addr_str[32];
-        inet_ntoa_r(client_addr.sin_addr, addr_str, sizeof(addr_str) - 1);
-        ESP_LOGI(TAG, "Client connected from %s:%d", addr_str, ntohs(client_addr.sin_port));
-
-        // Spawn a new task to handle each client connection
-        // This allows multiple simultaneous connections
-        BaseType_t task_created = xTaskCreate(handle_client_task, "ssl_passthrough", 
-                                               SSL_PASSTHROUGH_TASK_STACK_SIZE, (void *)client_sock, 5, NULL);
-        if (task_created != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create client handler task");
-            close(client_sock);
-        }
-    }
-
-    close(server_socket);
-    vTaskDelete(NULL);
-}
+// Proxy tasks are in proxy.c
 
 /** Task to initialize WiFi-dependent services after connection */
 static void wifi_services_task(void *pvParameters)
@@ -2492,16 +1636,11 @@ static void wifi_services_task(void *pvParameters)
 
     ESP_LOGI(TAG, "WiFi connected - starting proxy services");
 
-    // Initialize buffer pool for proxy connections
-    init_buffer_pool();
-
     // Start WiFi quality monitoring task
     xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 3072, NULL, 3, NULL);
 
-    // Start TCP server task (proxy)
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
-
-    ESP_LOGI(TAG, "Proxy services started - forwarding to %s:443", POWERWALL_IP_STR);
+    // Start proxy server (handles buffer pool init and TCP server)
+    proxy_start();
 
     vTaskDelete(NULL);
 }
@@ -2539,6 +1678,10 @@ void app_main(void)
     // Wait for Ethernet to get IP before starting OTA server
     ESP_LOGI(TAG, "Waiting for Ethernet IP...");
     xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, false, true, portMAX_DELAY);
+
+    // Initialize modules that depend on Ethernet
+    remote_ota_init(eth_netif);
+    proxy_init(s_event_group, ETH_GOT_IP_BIT, &last_successful_connection_time);
 
     // Start HTTP server immediately (on Ethernet interface)
     // This allows WiFi config even if WiFi credentials are wrong
