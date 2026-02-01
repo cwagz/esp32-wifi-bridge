@@ -1,4 +1,6 @@
-# ESP32 WiFi Bridge - Development Notes
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -9,69 +11,11 @@ ESP32-S3 WiFi-Ethernet SSL bridge that forwards encrypted traffic from Ethernet 
 ```bash
 pio run                    # Build firmware
 pio run -t upload          # Upload via USB
+pio device monitor         # Serial monitor
 ./deploy.sh                # Build and deploy via OTA (mDNS discovery)
 ./deploy.sh -a             # Deploy to ALL eligible devices
 ./deploy.sh -d -i <IP>     # Deploy only to specific IP
-./deploy.sh -b             # Build only
 ```
-
-## Key Files
-
-- `src/main.c` - Main application (proxy, web server, WiFi config, OTA)
-- `include/config.h` - Configuration constants (WiFi defaults, pins, ports)
-- `include/web_ui.h` - Web UI assets (SVG icons, CSS styles, JavaScript)
-- `deploy.sh` - Build and OTA deployment script with mDNS discovery
-- `partitions.csv` - OTA partition layout (ota_0, ota_1)
-- `platformio.ini` - PlatformIO config (pinned to espressif32@6.9.0)
-
-## Features
-
-### Web Dashboard (Port 80)
-- Real-time status page with auto-refresh (5 second interval)
-- CPU usage, uptime, and WiFi signal strength monitoring
-- Request history with timing metrics (TTFB, TTLB)
-- System log viewer with color-coded log levels
-- Cumulative statistics (bytes in/out, success rate)
-- Dark mode UI with responsive design
-
-### OTA Updates
-- HTTP server on port 80 (Ethernet interface)
-- Web UI for firmware upload at `http://<eth-ip>/`
-- Automatic rollback if firmware crashes before validation
-- OTA server starts before WiFi connects (allows recovery from bad WiFi config)
-
-### WiFi Configuration (Web UI)
-- Credentials stored in NVS (persist across reboots)
-- Scan for available networks from web UI
-- Change WiFi settings without reflashing
-- Falls back to compiled defaults if NVS empty
-
-### mDNS Service
-- Hostname: `powerwall.local`
-- Service: `_powerwall._tcp`
-- TXT records: `wifi_ssid`, `target`, `ota_port`, `version`
-
-### Deploy Script Features
-- mDNS device discovery (dns-sd on macOS, avahi on Linux)
-- Multi-device selection menu
-- `-a/--all` flag to deploy to all eligible devices
-- Progress bar during firmware upload
-- Device compatibility check (requires `ota_port` TXT record)
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Status dashboard (HTML) |
-| `/api/status` | GET | System status JSON (CPU, uptime, WiFi RSSI, stats) |
-| `/api/rssi` | GET | WiFi signal strength |
-| `/api/requests` | GET | Request history with timing metrics |
-| `/api/logs` | GET | System log entries |
-| `/wifi/scan` | GET | Scan for available WiFi networks |
-| `/wifi/save` | POST | Save WiFi credentials |
-| `/ota/upload` | POST | Upload firmware binary |
-| `/ota/rollback` | POST | Rollback to previous firmware |
-| `/reboot` | POST | Trigger device reboot |
 
 ## Architecture
 
@@ -81,29 +25,66 @@ pio run -t upload          # Upload via USB
                             Port 80 Web UI/OTA
 ```
 
+- **Ethernet (W5500 via SPI)**: Connected to user's network with internet access
+- **WiFi**: Connected to Powerwall's isolated network (192.168.91.x, no internet)
+- **Proxy**: TCP passthrough on port 443, no TLS termination
+- **Web UI**: Status dashboard and OTA updates on port 80 (Ethernet only)
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/main.c` | Single-file application: proxy, web server, WiFi config, OTA, monitoring |
+| `include/config.h` | All configuration constants (pins, ports, timeouts, URLs) |
+| `include/web_ui.h` | Web UI assets: SVG icons, CSS, JavaScript (as C string macros) |
+| `partitions.csv` | OTA partition layout (ota_0/ota_1 at 1.75MB each) |
+| `sdkconfig.defaults` | ESP-IDF settings (TLS, WiFi, FreeRTOS, certificate bundle) |
+
+## Code Structure (main.c)
+
+The application is organized in sections:
+1. **State variables** - Request logs, statistics, OTA state, watchdog timers
+2. **Utility functions** - Log capture, buffer pool, NVS storage, JSON parsing
+3. **HTTP handlers** - Web UI, API endpoints, OTA upload, WiFi config
+4. **Remote OTA** - GitHub version check and firmware download (uses Ethernet interface)
+5. **Event handlers** - Ethernet/WiFi connection events
+6. **Network init** - W5500 SPI setup, WiFi station mode, mDNS
+7. **Background tasks** - System monitor, WiFi monitor, connection watchdog, proxy server
+8. **app_main** - Initialization sequence
+
+## Important Patterns
+
+- **Dual network interfaces**: HTTP client must specify `if_name` to use Ethernet for internet access (WiFi has no internet)
+- **FreeRTOS tasks**: Must call `vTaskDelete(NULL)` before returning or run forever
+- **String escaping in web_ui.h**: Use single `%` for CSS/JS (not `%%`), only use `%%` in printf format strings
+- **OTA validation**: Firmware marked valid after Ethernet IP obtained to prevent rollback during WiFi config
+- **Buffer pool**: Pre-allocated buffers for proxy connections to avoid malloc per request
+
 ## Hardware
 
 - Board: ESP32-S3-POE-ETH (Waveshare)
-- Ethernet: W5500 via SPI
-- Pins: MISO=12, MOSI=11, SCLK=13, CS=14, INT=10
+- Ethernet: W5500 via SPI (MISO=12, MOSI=11, SCLK=13, CS=14, INT=10)
+- Platform pinned to espressif32@6.9.0
 
-## Configuration Defaults (config.h)
+## API Endpoints
 
-- WiFi: Stored in NVS, defaults in config.h
-- Powerwall IP: 192.168.91.1
-- Proxy port: 443
-- Web UI port: 80
-- TTL: 64 (hides external origin)
-- Buffer size: 4096 bytes
-- Max concurrent clients: 4
-- WiFi quality log interval: 30 seconds
-- System monitor interval: 30 seconds
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Status dashboard |
+| `/api/status` | GET | System status JSON |
+| `/api/requests` | GET | Request history with TTFB/TTLB |
+| `/api/logs` | GET | System log entries |
+| `/api/update` | GET | Remote OTA status |
+| `/api/check-update` | POST | Trigger GitHub version check |
+| `/api/install-update` | POST | Install update from GitHub |
+| `/wifi/scan` | GET | Scan WiFi networks |
+| `/wifi/save` | POST | Save WiFi credentials |
+| `/ota/upload` | POST | Upload firmware binary |
+| `/reboot` | POST | Trigger reboot |
 
-## Notes
+## CI/CD
 
-- Ethernet MAC derived from WiFi MAC (locally administered bit set)
-- WiFi scan requires temporary disconnect (ESP32 limitation)
-- OTA validation happens after Ethernet IP obtained (prevents rollback during WiFi config)
-- Platform pinned to espressif32@6.9.0 to avoid toolchain issues
-- Request logging tracks TTFB (time to first byte) and TTLB (time to last byte)
-- Log capture uses ring buffer (50 entries, 120 chars max per entry)
+- GitHub Actions builds on push to main and on tags
+- Tagged releases (`v*`) deploy to GitHub Pages and create releases
+- ESP Web Tools flasher at GitHub Pages URL
+- Remote OTA checks `version.json` from GitHub Pages
