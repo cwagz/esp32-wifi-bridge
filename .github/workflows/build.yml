@@ -22,12 +22,23 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Build Firmware
-        run: pio run
-
       - name: Get Version
         id: version
-        run: echo "version=$(git describe --always --dirty)" >> $GITHUB_OUTPUT
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # For tagged releases, use the tag name
+            VERSION="${{ github.ref_name }}"
+          else
+            # For other builds, use git describe
+            VERSION=$(git describe --always --dirty)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+
+      - name: Build Firmware
+        run: pio run
+        env:
+          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Prepare Artifacts
         run: |
