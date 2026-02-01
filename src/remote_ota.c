@@ -108,21 +108,21 @@ static void check_for_remote_update_task(void *pvParameters)
     ESP_LOGI(TAG, "Checking for remote firmware update from GitHub via Ethernet...");
 
     esp_http_client_handle_t client = NULL;
+    esp_netif_t *old_default = NULL;
 
-    // Get interface name to force HTTP traffic through specified interface
-    char if_name[8] = {0};
+    // Force all traffic through Ethernet by making it the default netif
     if (ota_netif) {
-        esp_netif_get_netif_impl_name(ota_netif, if_name);
-        ESP_LOGI(TAG, "Using interface: %s", if_name);
+        old_default = esp_netif_get_default_netif();
+        esp_netif_set_default_netif(ota_netif);
+        ESP_LOGI(TAG, "Set Ethernet as default interface");
     }
 
-    // Configure HTTP client for GitHub (with certificate verification)
     esp_http_client_config_t config = {
         .url = REMOTE_OTA_VERSION_URL,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 15000,
         .buffer_size = 1024,
-        .if_name = if_name[0] ? if_name : NULL,
+        .user_agent = "ESP32-WiFi-Bridge/1.0",
     };
 
     client = esp_http_client_init(&config);
@@ -209,6 +209,11 @@ cleanup:
         esp_http_client_cleanup(client);
     }
 
+    // Restore old default interface
+    if (old_default) {
+        esp_netif_set_default_netif(old_default);
+    }
+
     if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         remote_ota.check_in_progress = false;
         xSemaphoreGive(remote_ota_mutex);
@@ -219,47 +224,233 @@ cleanup:
 
 // ===== OTA Download Task =====
 
-/** Perform OTA update from remote URL */
+/** Perform OTA update from remote URL using chunked download with resume */
 static void perform_remote_ota_task(void *pvParameters)
 {
     const char *url = (const char *)pvParameters;
+    esp_netif_t *old_default = NULL;
+    esp_ota_handle_t ota_handle = 0;
+    esp_http_client_handle_t http_client = NULL;
+    const esp_partition_t *update_partition = NULL;
+    esp_err_t err;
 
-    ESP_LOGI(TAG, "Starting remote OTA from: %s", url);
+    ESP_LOGI(TAG, "=== Remote OTA Starting ===");
+    ESP_LOGI(TAG, "URL: %s", url);
+    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
-    // Get interface name to force download through specified interface
-    char if_name[8] = {0};
+    // Force all traffic through Ethernet
     if (ota_netif) {
-        esp_netif_get_netif_impl_name(ota_netif, if_name);
-        ESP_LOGI(TAG, "Downloading via interface: %s", if_name);
-    }
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 60000,
-        .buffer_size = 4096,
-        .buffer_size_tx = 1024,
-        .if_name = if_name[0] ? if_name : NULL,
-    };
-
-    esp_https_ota_config_t ota_config = {
-        .http_config = &config,
-    };
-
-    esp_err_t err = esp_https_ota(&ota_config);
-
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Remote OTA successful! Rebooting...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
-    } else {
-        ESP_LOGE(TAG, "Remote OTA failed: %s", esp_err_to_name(err));
-        if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            remote_ota.install_in_progress = false;
-            xSemaphoreGive(remote_ota_mutex);
+        old_default = esp_netif_get_default_netif();
+        esp_netif_set_default_netif(ota_netif);
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(ota_netif, &ip_info) == ESP_OK) {
+            ESP_LOGI(TAG, "Using Ethernet - IP: " IPSTR, IP2STR(&ip_info.ip));
         }
     }
 
+    // Find OTA partition
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        ESP_LOGE(TAG, "No OTA partition found");
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "Writing to partition: %s at 0x%lx",
+             update_partition->label, (unsigned long)update_partition->address);
+
+    // Allocate download buffer
+    const size_t chunk_size = 4096;
+    char *buffer = malloc(chunk_size);
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate buffer");
+        goto cleanup;
+    }
+
+    // First, get the file size with a HEAD request
+    esp_http_client_config_t config = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 30000,
+        .buffer_size = 2048,
+        .skip_cert_common_name_check = true,
+        .user_agent = "Mozilla/5.0 ESP32",
+    };
+
+    http_client = esp_http_client_init(&config);
+    if (!http_client) {
+        ESP_LOGE(TAG, "Failed to init HTTP client");
+        free(buffer);
+        goto cleanup;
+    }
+
+    // Get file size
+    esp_http_client_set_method(http_client, HTTP_METHOD_HEAD);
+    err = esp_http_client_perform(http_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HEAD request failed: %s", esp_err_to_name(err));
+        free(buffer);
+        goto cleanup;
+    }
+
+    int file_size = esp_http_client_get_content_length(http_client);
+    ESP_LOGI(TAG, "Firmware size: %d bytes (%.1f KB)", file_size, file_size / 1024.0);
+    esp_http_client_cleanup(http_client);
+    http_client = NULL;
+
+    // Begin OTA
+    err = esp_ota_begin(update_partition, file_size, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
+        free(buffer);
+        goto cleanup;
+    }
+
+    // Download in chunks with Range requests (allows resume on connection drop)
+    int downloaded = 0;
+    int retries = 0;
+    const int max_retries = 10;
+    const int range_chunk = 65536;  // 64KB per request
+
+    while (downloaded < file_size && retries < max_retries) {
+        int range_end = downloaded + range_chunk - 1;
+        if (range_end >= file_size) range_end = file_size - 1;
+
+        // Create new connection for each chunk
+        http_client = esp_http_client_init(&config);
+        if (!http_client) {
+            ESP_LOGE(TAG, "Failed to init HTTP client for chunk");
+            retries++;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        // Set Range header
+        char range_header[64];
+        snprintf(range_header, sizeof(range_header), "bytes=%d-%d", downloaded, range_end);
+        esp_http_client_set_header(http_client, "Range", range_header);
+        esp_http_client_set_method(http_client, HTTP_METHOD_GET);
+
+        err = esp_http_client_open(http_client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to open connection: %s (retry %d)", esp_err_to_name(err), retries + 1);
+            esp_http_client_cleanup(http_client);
+            http_client = NULL;
+            retries++;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        int content_length = esp_http_client_fetch_headers(http_client);
+        int status = esp_http_client_get_status_code(http_client);
+
+        if (status != 206 && status != 200) {
+            ESP_LOGW(TAG, "Unexpected HTTP status: %d (retry %d)", status, retries + 1);
+            esp_http_client_close(http_client);
+            esp_http_client_cleanup(http_client);
+            http_client = NULL;
+            retries++;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        // Read this chunk
+        int chunk_downloaded = 0;
+        bool chunk_error = false;
+
+        while (chunk_downloaded < content_length) {
+            int to_read = content_length - chunk_downloaded;
+            if (to_read > (int)chunk_size) to_read = chunk_size;
+
+            int read_len = esp_http_client_read(http_client, buffer, to_read);
+            if (read_len <= 0) {
+                ESP_LOGW(TAG, "Read error at offset %d (got %d bytes this chunk)",
+                         downloaded + chunk_downloaded, chunk_downloaded);
+                chunk_error = true;
+                break;
+            }
+
+            // Write to flash
+            err = esp_ota_write(ota_handle, buffer, read_len);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "OTA write failed: %s", esp_err_to_name(err));
+                free(buffer);
+                esp_http_client_cleanup(http_client);
+                goto cleanup;
+            }
+
+            chunk_downloaded += read_len;
+        }
+
+        esp_http_client_close(http_client);
+        esp_http_client_cleanup(http_client);
+        http_client = NULL;
+
+        if (chunk_error) {
+            retries++;
+            ESP_LOGI(TAG, "Chunk failed, retrying from offset %d (retry %d/%d)",
+                     downloaded, retries, max_retries);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        // Chunk succeeded
+        downloaded += chunk_downloaded;
+        retries = 0;  // Reset retries on success
+
+        int progress = (file_size > 0) ? (downloaded * 100 / file_size) : 0;
+        ESP_LOGI(TAG, "Progress: %d%% (%d / %d bytes)", progress, downloaded, file_size);
+    }
+
+    free(buffer);
+
+    if (downloaded < file_size) {
+        ESP_LOGE(TAG, "Download incomplete: %d / %d bytes after %d retries",
+                 downloaded, file_size, max_retries);
+        goto cleanup;
+    }
+
+    // Finish OTA
+    ESP_LOGI(TAG, "Download complete, verifying...");
+    err = esp_ota_end(ota_handle);
+    ota_handle = 0;
+
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            ESP_LOGE(TAG, "Firmware validation failed - corrupted");
+        } else {
+            ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
+        }
+        goto cleanup;
+    }
+
+    // Set boot partition
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
+        goto cleanup;
+    }
+
+    ESP_LOGI(TAG, "OTA successful! Rebooting in 2 seconds...");
+    if (old_default) esp_netif_set_default_netif(old_default);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+
+cleanup:
+    if (http_client) {
+        esp_http_client_cleanup(http_client);
+    }
+    if (ota_handle) {
+        esp_ota_abort(ota_handle);
+    }
+    if (old_default) {
+        esp_netif_set_default_netif(old_default);
+    }
+
+    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        remote_ota.install_in_progress = false;
+        xSemaphoreGive(remote_ota_mutex);
+    }
+
+    ESP_LOGI(TAG, "=== Remote OTA Ended ===");
     vTaskDelete(NULL);
 }
 
