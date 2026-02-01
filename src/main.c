@@ -1486,7 +1486,7 @@ static void init_mdns(void)
     mdns_txt_item_t txt_records[] = {
         {"wifi_ssid", wifi_ssid},
         {"target", POWERWALL_IP_STR},
-        {"ota_port", "8080"},
+        {"ota_port", "80"},
     };
 
     // Add _powerwall._tcp service for proxy discovery (port 443)

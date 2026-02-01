@@ -17,17 +17,26 @@ pio run -t upload          # Upload via USB
 
 ## Key Files
 
-- `src/main.c` - Main application (proxy, OTA server, WiFi config)
+- `src/main.c` - Main application (proxy, web server, WiFi config, OTA)
 - `include/config.h` - Configuration constants (WiFi defaults, pins, ports)
+- `include/web_ui.h` - Web UI assets (SVG icons, CSS styles, JavaScript)
 - `deploy.sh` - Build and OTA deployment script with mDNS discovery
 - `partitions.csv` - OTA partition layout (ota_0, ota_1)
 - `platformio.ini` - PlatformIO config (pinned to espressif32@6.9.0)
 
 ## Features
 
+### Web Dashboard (Port 80)
+- Real-time status page with auto-refresh (5 second interval)
+- CPU usage, uptime, and WiFi signal strength monitoring
+- Request history with timing metrics (TTFB, TTLB)
+- System log viewer with color-coded log levels
+- Cumulative statistics (bytes in/out, success rate)
+- Dark mode UI with responsive design
+
 ### OTA Updates
-- HTTP server on port 8080 (Ethernet interface)
-- Web UI for firmware upload at `http://<eth-ip>:8080/`
+- HTTP server on port 80 (Ethernet interface)
+- Web UI for firmware upload at `http://<eth-ip>/`
 - Automatic rollback if firmware crashes before validation
 - OTA server starts before WiFi connects (allows recovery from bad WiFi config)
 
@@ -49,12 +58,27 @@ pio run -t upload          # Upload via USB
 - Progress bar during firmware upload
 - Device compatibility check (requires `ota_port` TXT record)
 
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Status dashboard (HTML) |
+| `/api/status` | GET | System status JSON (CPU, uptime, WiFi RSSI, stats) |
+| `/api/rssi` | GET | WiFi signal strength |
+| `/api/requests` | GET | Request history with timing metrics |
+| `/api/logs` | GET | System log entries |
+| `/wifi/scan` | GET | Scan for available WiFi networks |
+| `/wifi/save` | POST | Save WiFi credentials |
+| `/ota/upload` | POST | Upload firmware binary |
+| `/ota/rollback` | POST | Rollback to previous firmware |
+| `/reboot` | POST | Trigger device reboot |
+
 ## Architecture
 
 ```
 [Ethernet Client] <==SSL==> [ESP32 Bridge] <==SSL==> [Powerwall WiFi]
                             Port 443 proxy
-                            Port 8080 OTA/Config UI
+                            Port 80 Web UI/OTA
 ```
 
 ## Hardware
@@ -68,10 +92,12 @@ pio run -t upload          # Upload via USB
 - WiFi: Stored in NVS, defaults in config.h
 - Powerwall IP: 192.168.91.1
 - Proxy port: 443
-- OTA port: 8080
+- Web UI port: 80
 - TTL: 64 (hides external origin)
 - Buffer size: 4096 bytes
 - Max concurrent clients: 4
+- WiFi quality log interval: 30 seconds
+- System monitor interval: 30 seconds
 
 ## Notes
 
@@ -79,3 +105,5 @@ pio run -t upload          # Upload via USB
 - WiFi scan requires temporary disconnect (ESP32 limitation)
 - OTA validation happens after Ethernet IP obtained (prevents rollback during WiFi config)
 - Platform pinned to espressif32@6.9.0 to avoid toolchain issues
+- Request logging tracks TTFB (time to first byte) and TTLB (time to last byte)
+- Log capture uses ring buffer (50 entries, 120 chars max per entry)
