@@ -1267,9 +1267,10 @@ static int version_compare(const char *v1, const char *v2)
     return strcmp(v1, v2);
 }
 
-/** Check for remote firmware updates from GitHub */
-static void check_for_remote_update(void)
+/** Check for remote firmware updates from GitHub (runs as FreeRTOS task) */
+static void check_for_remote_update_task(void *pvParameters)
 {
+    (void)pvParameters;  // Unused
     if (!remote_ota_mutex) {
         remote_ota_mutex = xSemaphoreCreateMutex();
     }
@@ -1286,13 +1287,23 @@ static void check_for_remote_update(void)
     remote_ota.check_in_progress = true;
     xSemaphoreGive(remote_ota_mutex);
 
-    ESP_LOGI(TAG, "Checking for remote firmware update...");
+    ESP_LOGI(TAG, "Checking for remote firmware update from GitHub via Ethernet...");
+
+    // Get Ethernet interface name to force HTTP traffic through Ethernet (not WiFi)
+    char if_name[8] = {0};
+    if (eth_netif) {
+        esp_netif_get_netif_impl_name(eth_netif, if_name);
+        ESP_LOGI(TAG, "Using interface: %s", if_name);
+    }
 
     // Configure HTTP client for GitHub (with certificate verification)
+    // Use Ethernet interface since WiFi (Powerwall) has no internet
     esp_http_client_config_t config = {
         .url = REMOTE_OTA_VERSION_URL,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 10000,
+        .timeout_ms = 15000,
+        .buffer_size = 1024,
+        .if_name = if_name[0] ? if_name : NULL,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -1303,7 +1314,7 @@ static void check_for_remote_update(void)
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to connect to GitHub: %s (no internet access?)", esp_err_to_name(err));
         goto cleanup;
     }
 
@@ -1383,6 +1394,8 @@ cleanup:
         remote_ota.check_in_progress = false;
         xSemaphoreGive(remote_ota_mutex);
     }
+
+    vTaskDelete(NULL);  // Task must not return
 }
 
 /** Perform OTA update from remote URL */
@@ -1392,12 +1405,20 @@ static void perform_remote_ota_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Starting remote OTA from: %s", url);
 
+    // Get Ethernet interface name to force download through Ethernet
+    char if_name[8] = {0};
+    if (eth_netif) {
+        esp_netif_get_netif_impl_name(eth_netif, if_name);
+        ESP_LOGI(TAG, "Downloading via interface: %s", if_name);
+    }
+
     esp_http_client_config_t config = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 60000,
         .buffer_size = 4096,
         .buffer_size_tx = 1024,
+        .if_name = if_name[0] ? if_name : NULL,
     };
 
     esp_https_ota_config_t ota_config = {
@@ -1465,7 +1486,7 @@ static esp_err_t api_check_update_handler(httpd_req_t *req)
 {
     // Check in background to avoid blocking
     xTaskCreate(
-        (TaskFunction_t)check_for_remote_update,
+        check_for_remote_update_task,
         "update_check",
         4096,
         NULL,
@@ -2534,7 +2555,7 @@ void app_main(void)
     xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
 
     // Start connection watchdog task
-    xTaskCreate(connection_watchdog_task, "conn_watchdog", 2048, NULL, 3, NULL);
+    xTaskCreate(connection_watchdog_task, "conn_watchdog", 3072, NULL, 3, NULL);
 
     // Start WiFi-dependent services in background task
     // This allows OTA to remain responsive while waiting for WiFi
