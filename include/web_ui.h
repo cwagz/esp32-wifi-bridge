@@ -59,12 +59,12 @@ static const char *DARK_CSS =
     ".label{font-size:0.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em}"
     ".value{font-size:1rem;font-weight:500;margin-top:0.25rem;font-family:ui-monospace,monospace}"
     // Status indicators
-    ".status-dot{display:inline-block;width:0.5rem;height:0.5rem;border-radius:50%%;margin-right:0.5rem}"
+    ".status-dot{display:inline-block;width:0.5rem;height:0.5rem;border-radius:50%;margin-right:0.5rem}"
     ".status-ok{background:#22c55e}"
     ".status-warn{background:#eab308}"
     ".status-err{background:#ef4444}"
     // Form elements
-    "input,select{width:100%%;padding:0.625rem;border-radius:0.375rem;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:0.875rem;margin-top:0.25rem}"
+    "input,select{width:100%;padding:0.625rem;border-radius:0.375rem;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:0.875rem;margin-top:0.25rem}"
     "input:focus,select:focus{outline:none;border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,0.3)}"
     // Buttons
     ".btn{padding:0.625rem 1.25rem;border-radius:0.375rem;font-weight:500;cursor:pointer;border:none;font-size:0.875rem;transition:all 0.15s}"
@@ -88,7 +88,7 @@ static const char *DARK_CSS =
     // Dividers
     "hr{border:none;border-top:1px solid #334155;margin:1rem 0}"
     // Animations
-    "@keyframes pulse{0%%,100%%{opacity:1}50%%{opacity:0.5}}"
+    "@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}"
     ".animate-pulse{animation:pulse 2s infinite}";
 
 // ===== JavaScript for Auto-refresh =====
@@ -105,7 +105,7 @@ static const char *DARK_CSS =
     "function fmtAge(s){return s>=3600?Math.floor(s/3600)+'h':s>=60?Math.floor(s/60)+'m':s+'s';}" \
     "function fmtBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';" \
     "if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}" \
-    "function fmtUptime(s){var d=Math.floor(s/86400),h=Math.floor((s%%86400)/3600),m=Math.floor((s%%3600)/60),sec=s%%60;" \
+    "function fmtUptime(s){var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60;" \
     "return d+'d '+h+'h '+m+'m '+sec+'s';}" \
     "var lastOk=Date.now(),fetching=false;" \
     "function updAge(){var s=Math.floor((Date.now()-lastOk)/1000);var el=document.getElementById('lastref');" \
@@ -118,11 +118,11 @@ static const char *DARK_CSS =
     "var st=d[0],r=st.wifi.rssi,sigEl=document.getElementById('sig');" \
     "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';" \
     "sigEl.innerHTML='<span style=\"color:'+sc+'\">'+r+' dBm ('+sigQ(r)+')</span>';}else{sigEl.textContent='-';}" \
-    "document.getElementById('cpu').textContent=st.cpu+'%%';" \
+    "document.getElementById('cpu').textContent=st.cpu+'%';" \
     "document.getElementById('uptime').textContent=fmtUptime(st.uptime);" \
     "document.getElementById('reqcnt').textContent=st.total_requests;" \
     "var sr=st.total_requests>0?Math.round(st.successful_requests*100/st.total_requests):0;" \
-    "var srEl=document.getElementById('succrate');srEl.textContent=sr+'%%';" \
+    "var srEl=document.getElementById('succrate');srEl.textContent=sr+'%';" \
     "srEl.style.color=sr>=90?'#22c55e':sr>=70?'#eab308':'#ef4444';" \
     "document.getElementById('failcnt').textContent=st.failed_requests;" \
     "document.getElementById('bytesin').textContent=fmtBytes(st.total_bytes_in);" \
