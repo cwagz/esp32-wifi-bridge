@@ -138,6 +138,33 @@ static const char *DARK_CSS =
     "updAge();})" \
     ".catch(function(){fetching=false;updAge();});}" \
     "setInterval(refresh,5000);setInterval(updAge,1000);refresh();" \
+    "function checkUpdate(){" \
+    "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\">Checking...</span>';" \
+    "fetch('/api/check-update',{method:'POST'}).then(function(){" \
+    "setTimeout(refreshUpdateStatus,2000);});}" \
+    "function refreshUpdateStatus(){" \
+    "fetch('/api/update').then(r=>r.json()).then(function(u){" \
+    "var st=document.getElementById('update-status');" \
+    "var act=document.getElementById('update-actions');" \
+    "var rev=document.getElementById('revert-btn');" \
+    "if(u.check_in_progress){st.innerHTML='<span class=\"animate-pulse\">Checking...</span>';setTimeout(refreshUpdateStatus,1000);return;}" \
+    "if(u.install_in_progress){st.innerHTML='<span class=\"animate-pulse\" style=\"color:#3b82f6\">Installing...</span>';setTimeout(refreshUpdateStatus,2000);return;}" \
+    "if(u.update_available){" \
+    "st.innerHTML='<span style=\"color:#22c55e\">Update available: '+u.available_version+'</span> ('+Math.round(u.firmware_size/1024)+' KB)';" \
+    "act.style.display='flex';" \
+    "}else if(u.available_version){" \
+    "st.textContent='Up to date ('+u.current_version+')';act.style.display='none';" \
+    "}else{st.textContent='Check failed';act.style.display='none';}" \
+    "if(u.previous_available){rev.style.display='inline-block';}else{rev.style.display='none';}" \
+    "}).catch(function(){document.getElementById('update-status').textContent='Check failed';});}" \
+    "function installUpdate(){" \
+    "if(!confirm('Install firmware update? Device will reboot.'))return;" \
+    "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\" style=\"color:#3b82f6\">Installing...</span>';" \
+    "fetch('/api/install-update',{method:'POST'}).then(function(){setTimeout(refreshUpdateStatus,2000);});}" \
+    "function revertFirmware(){" \
+    "if(!confirm('Revert to previous version? Device will reboot.'))return;" \
+    "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\" style=\"color:#eab308\">Reverting...</span>';" \
+    "fetch('/api/revert',{method:'POST'}).then(function(){setTimeout(refreshUpdateStatus,2000);});}" \
     "</script>"
 
 #endif // WEB_UI_H
