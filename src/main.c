@@ -275,6 +275,23 @@ static void check_powerwall_connectivity(void)
 // ===== OTA Update Handlers =====
 // Icons, CSS, and JavaScript are defined in web_ui.h
 
+/** Favicon handler - returns SVG icon */
+static esp_err_t favicon_handler(httpd_req_t *req)
+{
+    // Simple SVG favicon - blue rounded square with bridge/connection icon
+    static const char *favicon_svg =
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+        "<rect width='32' height='32' rx='6' fill='#3b82f6'/>"
+        "<path d='M6 16h20M16 8v16M10 12l-4 4 4 4M22 12l4 4-4 4' "
+        "stroke='white' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/>"
+        "</svg>";
+
+    httpd_resp_set_type(req, "image/svg+xml");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=604800");
+    httpd_resp_send(req, favicon_svg, strlen(favicon_svg));
+    return ESP_OK;
+}
+
 /** OTA status page - modern dark theme with WiFi config */
 static esp_err_t ota_status_handler(httpd_req_t *req)
 {
@@ -314,6 +331,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // Send HTML head and CSS separately (CSS is too large for single buffer)
     httpd_resp_sendstr_chunk(req,
         "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"" FAVICON_SVG "\">"
         "<title>ESP32 WiFi Bridge</title><style>");
     httpd_resp_sendstr_chunk(req, DARK_CSS);
     httpd_resp_sendstr_chunk(req,
@@ -1086,13 +1104,21 @@ static esp_err_t start_http_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WEB_HTTP_PORT;
     config.stack_size = 8192;
-    config.max_uri_handlers = 18;
+    config.max_uri_handlers = 20;
 
     esp_err_t err = httpd_start(&web_server, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
         return err;
     }
+
+    // Favicon
+    httpd_uri_t favicon = {
+        .uri = "/favicon.ico",
+        .method = HTTP_GET,
+        .handler = favicon_handler,
+    };
+    httpd_register_uri_handler(web_server, &favicon);
 
     // Main status page
     httpd_uri_t status_page = {
