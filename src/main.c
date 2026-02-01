@@ -41,6 +41,7 @@
 #include "web_ui.h"
 #include "proxy.h"
 #include "remote_ota.h"
+#include "wifi_metrics.h"
 
 static const char *TAG = "wifi-eth-bridge";
 
@@ -470,6 +471,17 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         httpd_resp_sendstr_chunk(req, buf);
         httpd_resp_sendstr_chunk(req, "</div></div>");
     }
+
+    // WiFi History Chart card
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"card\"><h2>" ICON_CHART " WiFi Signal History (24h)</h2>"
+        "<div class=\"chart-container\"><canvas id=\"wifichart\" width=\"560\" height=\"160\"></canvas></div>"
+        "<div class=\"chart-legend\">"
+        "<span><span class=\"dot\" style=\"background:#3b82f6\"></span>Signal (dBm)</span>"
+        "<span><span class=\"dot\" style=\"background:#22c55e\"></span>Connected %</span>"
+        "</div>"
+        "<div id=\"wifiinfo\" class=\"flex text-xs text-muted\" style=\"justify-content:space-between;margin-top:0.5rem\"></div>"
+        "</div>");
 
     // Recent requests card with TTFB (IDs for auto-refresh)
     httpd_resp_sendstr_chunk(req,
@@ -1039,6 +1051,61 @@ static esp_err_t api_logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** API endpoint for WiFi metrics history (24 hours of 5-minute buckets) */
+static esp_err_t api_wifi_history_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+
+    // Get metrics summary
+    wifi_metrics_summary_t summary;
+    wifi_metrics_get_summary(&summary);
+
+    // Start JSON response
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "{\"time_synced\":%s,\"boot_time_utc\":%lld,\"bucket_minutes\":%d,"
+        "\"total_buckets\":%d,\"current_bucket\":%d,"
+        "\"connected_sec\":%lu,\"disconnected_sec\":%lu,\"buckets\":[",
+        summary.time_synced ? "true" : "false",
+        (long long)summary.boot_time_utc,
+        WIFI_METRICS_BUCKET_MINUTES,
+        WIFI_METRICS_BUCKET_COUNT,
+        summary.current_bucket_index,
+        (unsigned long)summary.total_connected_sec,
+        (unsigned long)summary.total_disconnected_sec);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Get history buckets
+    wifi_metrics_bucket_t *buckets = malloc(sizeof(wifi_metrics_bucket_t) * WIFI_METRICS_BUCKET_COUNT);
+    if (buckets) {
+        int current_index;
+        wifi_metrics_get_history(buckets, &current_index);
+
+        bool first = true;
+        // Output buckets in chronological order (oldest first)
+        // Start from current_index + 1 (oldest) and wrap around
+        for (int i = 0; i < WIFI_METRICS_BUCKET_COUNT; i++) {
+            int idx = (current_index + 1 + i) % WIFI_METRICS_BUCKET_COUNT;
+            wifi_metrics_bucket_t *b = &buckets[idx];
+
+            if (b->valid) {
+                snprintf(buf, sizeof(buf), "%s[%d,%u,%u]",
+                    first ? "" : ",",
+                    b->avg_rssi,
+                    b->connection_pct,
+                    b->sample_count);
+                httpd_resp_sendstr_chunk(req, buf);
+                first = false;
+            }
+        }
+        free(buckets);
+    }
+
+    httpd_resp_sendstr_chunk(req, "]}");
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
 /** Reboot handler */
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
@@ -1195,6 +1262,13 @@ static esp_err_t start_http_server(void)
         .handler = api_logs_handler,
     };
     httpd_register_uri_handler(web_server, &api_logs);
+
+    httpd_uri_t api_wifi_history = {
+        .uri = "/api/wifi-history",
+        .method = HTTP_GET,
+        .handler = api_wifi_history_handler,
+    };
+    httpd_register_uri_handler(web_server, &api_wifi_history);
 
     // Remote OTA endpoints
     httpd_uri_t api_update = {
@@ -1665,6 +1739,9 @@ static void wifi_services_task(void *pvParameters)
     // Start WiFi quality monitoring task
     xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 3072, NULL, 3, NULL);
 
+    // Start WiFi metrics collection (for 24h charts)
+    wifi_metrics_start();
+
     // Start proxy server (handles buffer pool init and TCP server)
     proxy_start();
 
@@ -1708,6 +1785,7 @@ void app_main(void)
     // Initialize modules that depend on Ethernet
     remote_ota_init(eth_netif);
     proxy_init(s_event_group, ETH_GOT_IP_BIT, &last_successful_connection_time);
+    wifi_metrics_init(s_event_group, WIFI_CONNECTED_BIT, eth_netif);
 
     // Start HTTP server immediately (on Ethernet interface)
     // This allows WiFi config even if WiFi credentials are wrong

@@ -56,6 +56,20 @@
 // Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
 
+// ===== NTP Configuration =====
+// NTP servers for time synchronization (uses Ethernet interface)
+// Using IP addresses to avoid DNS resolution issues when WiFi network has no internet
+#define NTP_SERVER_PRIMARY "216.239.35.0"    // time.google.com
+#define NTP_SERVER_SECONDARY "216.239.35.4"  // time2.google.com
+#define NTP_SYNC_INTERVAL_MS (3600 * 1000)   // Re-sync every hour
+
+// ===== WiFi Metrics Configuration =====
+// Track WiFi signal strength and connection success over time
+#define WIFI_METRICS_BUCKET_MINUTES 5       // Each bucket covers 5 minutes
+#define WIFI_METRICS_HISTORY_HOURS 24       // Keep 24 hours of history
+#define WIFI_METRICS_SAMPLE_INTERVAL_SEC 30 // Sample RSSI every 30 seconds
+// Total buckets: (24 * 60) / 5 = 288 buckets
+
 // ===== Remote OTA Configuration =====
 // URL to check for firmware updates (GitHub Pages hosted version.json)
 #define REMOTE_OTA_VERSION_URL "https://mccahan.github.io/esp32-wifi-bridge/version.json"

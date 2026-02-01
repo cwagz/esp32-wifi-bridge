@@ -44,6 +44,10 @@
 
 #define ICON_ROUTER "<svg class=\"i\" viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"13\" width=\"18\" height=\"8\" rx=\"2\"/><circle cx=\"7\" cy=\"17\" r=\"1.5\"/><circle cx=\"12\" cy=\"17\" r=\"1.5\"/><path d=\"M12 3v7M8 6l4-3 4 3\"/></svg>"
 
+// ===== Chart Icon =====
+
+#define ICON_CHART "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M3 3v18h18V3H3zm16 16H5V5h14v14zM7 12h2v5H7v-5zm4-3h2v8h-2V9zm4-3h2v11h-2V6z\"/></svg>"
+
 // ===== Dark Mode CSS (Tailwind-inspired) =====
 
 static const char *DARK_CSS =
@@ -93,7 +97,12 @@ static const char *DARK_CSS =
     "hr{border:none;border-top:1px solid #334155;margin:1rem 0}"
     // Animations
     "@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}"
-    ".animate-pulse{animation:pulse 2s infinite}";
+    ".animate-pulse{animation:pulse 2s infinite}"
+    // Chart styles
+    ".chart-container{position:relative;height:180px;background:#0f172a;border-radius:0.375rem;padding:0.5rem;margin-top:0.5rem}"
+    ".chart-legend{display:flex;gap:1rem;justify-content:center;margin-top:0.5rem;font-size:0.75rem}"
+    ".chart-legend span{display:flex;align-items:center;gap:0.25rem}"
+    ".chart-legend .dot{width:8px;height:8px;border-radius:50%}";
 
 // ===== JavaScript for Auto-refresh =====
 
@@ -169,6 +178,39 @@ static const char *DARK_CSS =
     "if(!confirm('Revert to previous version? Device will reboot.'))return;" \
     "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\" style=\"color:#eab308\">Reverting...</span>';" \
     "fetch('/api/revert',{method:'POST'}).then(function(){setTimeout(refreshUpdateStatus,2000);});}" \
+    "function drawWifiChart(){" \
+    "fetch('/api/wifi-history').then(r=>r.json()).then(function(d){" \
+    "var c=document.getElementById('wifichart');if(!c)return;" \
+    "var ctx=c.getContext('2d');var w=c.width,h=c.height;" \
+    "ctx.clearRect(0,0,w,h);" \
+    "var b=d.buckets;if(!b||b.length===0){" \
+    "ctx.fillStyle='#64748b';ctx.font='12px system-ui';ctx.textAlign='center';" \
+    "ctx.fillText('No data yet - collecting...',w/2,h/2);return;}" \
+    "var pad={l:35,r:10,t:10,b:25};var cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;" \
+    "ctx.strokeStyle='#334155';ctx.lineWidth=1;" \
+    "for(var i=0;i<=4;i++){var y=pad.t+ch*i/4;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();}" \
+    "ctx.fillStyle='#64748b';ctx.font='10px system-ui';ctx.textAlign='right';" \
+    "ctx.fillText('-30',pad.l-4,pad.t+8);ctx.fillText('-50',pad.l-4,pad.t+ch*0.4+4);" \
+    "ctx.fillText('-70',pad.l-4,pad.t+ch*0.8+4);ctx.fillText('-90',pad.l-4,h-pad.b+4);" \
+    "ctx.textAlign='center';var hrs=[24,18,12,6,0];" \
+    "for(var i=0;i<hrs.length;i++){var x=pad.l+cw*i/(hrs.length-1);ctx.fillText(hrs[i]+'h',x,h-5);}" \
+    "var dx=cw/(b.length-1||1);" \
+    "ctx.beginPath();ctx.strokeStyle='rgba(34,197,94,0.3)';ctx.lineWidth=1;" \
+    "for(var i=0;i<b.length;i++){var x=pad.l+i*dx,pct=b[i][1],y=pad.t+ch*(1-pct/100);" \
+    "if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.lineTo(pad.l+(b.length-1)*dx,pad.t+ch);ctx.lineTo(pad.l,pad.t+ch);ctx.closePath();" \
+    "ctx.fillStyle='rgba(34,197,94,0.15)';ctx.fill();" \
+    "ctx.beginPath();ctx.strokeStyle='#3b82f6';ctx.lineWidth=2;" \
+    "var first=true;for(var i=0;i<b.length;i++){" \
+    "var rssi=b[i][0];if(rssi===0)continue;" \
+    "var x=pad.l+i*dx,y=pad.t+ch*((rssi+30)/(-90+30)*-1+1);y=Math.max(pad.t,Math.min(pad.t+ch,y));" \
+    "if(first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);}ctx.stroke();" \
+    "var info=document.getElementById('wifiinfo');if(info){" \
+    "var csec=d.connected_sec,dsec=d.disconnected_sec,total=csec+dsec;" \
+    "var upPct=total>0?Math.round(csec*100/total):0;" \
+    "info.innerHTML='<span>Uptime: '+upPct+'%</span><span>Connected: '+Math.floor(csec/60)+'m</span><span>Disconnected: '+Math.floor(dsec/60)+'m</span>'+" \
+    "(d.time_synced?'<span style=\"color:#22c55e\">NTP synced</span>':'<span style=\"color:#eab308\">NTP pending</span>');}" \
+    "}).catch(function(e){console.log('Chart error:',e);});}" \
+    "drawWifiChart();setInterval(drawWifiChart,60000);" \
     "</script>"
 
 #endif // WEB_UI_H
