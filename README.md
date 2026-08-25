@@ -23,6 +23,7 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 The device provides a web-based dashboard accessible on the Ethernet interface showing:
 - WiFi connection status and signal strength
 - Powerwall connectivity
+- Ethernet IP (DHCP or static) with click-to-configure
 - System metrics (CPU, heap, uptime)
 - Proxy statistics (requests, bytes, success rate)
 - WiFi signal history chart (24 hours)
@@ -49,7 +50,8 @@ The device provides a web-based dashboard accessible on the Ethernet interface s
 - **WiFi Client**: Connects to Tesla Powerwall AP (192.168.91.1)
 - **SSL Passthrough**: Forwards encrypted SSL/TLS traffic without decryption
 - **TTL Modification**: Modifies Time-To-Live on outgoing packets to hide external origin
-- **DHCP**: Both WiFi and Ethernet interfaces use DHCP
+- **Ethernet IP**: DHCP by default; optional static IP (address, mask, gateway, DNS) via the web UI
+- **DHCP fallback**: If a static IP is set and the gateway is unreachable for 45s with no LAN traffic, the device reboots into DHCP. Saved static settings are kept. Hold **BOOT for 3 seconds** to force DHCP.
 - **mDNS**: Advertises `powerwall.local` with "_powerwall" service on Ethernet interface
 - **Web Dashboard**: Real-time status page with auto-refresh
 - **WiFi Metrics**: 24-hour signal strength and connection history with 5-minute averages
@@ -79,18 +81,26 @@ Access the dashboard at `http://powerwall.local/` or `http://<ethernet-ip>/`
 
 Features:
 - Real-time WiFi and Powerwall status
+- Ethernet IP status (click to configure DHCP vs static)
 - System metrics (CPU, memory, uptime)
 - Proxy statistics and request history
 - WiFi signal strength chart (24h history)
 - WiFi configuration
 - Firmware updates (local upload or remote OTA)
 
+### Ethernet static IP
+
+1. Open the dashboard and click the **Ethernet** tile.
+2. Choose **Static IP**, fill in address / mask / gateway / DNS.
+3. Save — the device reboots onto the new address.
+4. If you cannot reach it, wait ~45 seconds for DHCP fallback, or hold **BOOT** for 3 seconds.
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Web dashboard |
-| `/api/status` | GET | System status JSON |
+| `/api/status` | GET | System status JSON (includes `eth`) |
 | `/api/requests` | GET | Recent proxy requests with TTFB/TTLB |
 | `/api/logs` | GET | System log entries |
 | `/api/wifi-history` | GET | WiFi metrics (24h of 5-min buckets) |
@@ -99,6 +109,7 @@ Features:
 | `/api/install-update` | POST | Install update from GitHub |
 | `/wifi/scan` | GET | Scan available WiFi networks |
 | `/wifi/save` | POST | Save WiFi credentials |
+| `/eth/save` | POST | Save Ethernet DHCP/static settings (reboots) |
 | `/ota/upload` | POST | Upload firmware binary |
 | `/reboot` | POST | Trigger device reboot |
 
@@ -119,6 +130,9 @@ Edit `include/config.h` to customize:
 #define PROXY_TIMEOUT_MS 60000
 #define TTL_VALUE 64
 
+// Ethernet static-IP fallback
+#define ETH_DHCP_FALLBACK_SEC 45
+
 // NTP Settings
 #define NTP_SERVER_PRIMARY "216.239.35.0"    // time.google.com
 #define NTP_SERVER_SECONDARY "216.239.35.4"  // time2.google.com
@@ -127,6 +141,8 @@ Edit `include/config.h` to customize:
 #define WIFI_METRICS_BUCKET_MINUTES 5        // 5-minute averages
 #define WIFI_METRICS_HISTORY_HOURS 24        // 24 hours of history
 ```
+
+Ethernet static vs DHCP is stored in NVS (not compiled in). Configure it from the dashboard.
 
 ## Building & Deployment
 
@@ -162,7 +178,7 @@ dns-sd -B _powerwall._tcp
 
 | File | Purpose |
 |------|---------|
-| `src/main.c` | Core application: web server, WiFi config, OTA, initialization |
+| `src/main.c` | Core application: web server, WiFi/Ethernet config, OTA, initialization |
 | `src/proxy.c` | SSL passthrough proxy with buffer pool and request logging |
 | `src/remote_ota.c` | GitHub OTA: version checking and firmware updates |
 | `src/wifi_metrics.c` | NTP time sync and WiFi metrics collection |

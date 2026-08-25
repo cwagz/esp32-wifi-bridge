@@ -50,8 +50,8 @@ The codebase is split into three modules with clear responsibilities:
 - Network initialization (Ethernet W5500, WiFi station)
 - HTTP server and web UI handlers
 - Event handlers (connect/disconnect)
-- Background tasks (system monitor, WiFi monitor, connection watchdog)
-- NVS storage for WiFi credentials
+- Background tasks (system monitor, WiFi monitor, connection watchdog, Ethernet DHCP fallback, BOOT-button recovery)
+- NVS storage for WiFi credentials and Ethernet static/DHCP settings
 
 **proxy.c** - SSL passthrough proxy
 - Buffer pool for connection handling
@@ -73,6 +73,8 @@ The codebase is split into three modules with clear responsibilities:
 - **OTA validation**: Firmware marked valid after Ethernet IP obtained to prevent rollback during WiFi config
 - **Buffer pool**: Pre-allocated buffers for proxy connections to avoid malloc per request
 - **Module initialization**: Call `remote_ota_init(eth_netif)` and `proxy_init(event_group, bit, &timestamp)` before starting services
+- **Ethernet IP**: Default DHCP. Static config lives in NVS namespace `eth_config`. Apply with `esp_netif_dhcpc_stop` + `esp_netif_set_ip_info` before `esp_eth_start`. DHCP fallback is a one-shot NVS flag (`force_dhcp`) that ignores static for a single boot; saved static settings are not erased.
+- **Lockout recovery**: After static apply, ICMP-ping the gateway for `ETH_DHCP_FALLBACK_SEC`. HTTP `/api/status` or a successful proxy connection cancels fallback. Hold GPIO0 (BOOT) 3 seconds to force DHCP.
 
 ## Hardware
 
@@ -85,7 +87,7 @@ The codebase is split into three modules with clear responsibilities:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Status dashboard |
-| `/api/status` | GET | System status JSON |
+| `/api/status` | GET | System status JSON (includes `eth`) |
 | `/api/requests` | GET | Request history with TTFB/TTLB |
 | `/api/logs` | GET | System log entries |
 | `/api/update` | GET | Remote OTA status |
@@ -93,6 +95,7 @@ The codebase is split into three modules with clear responsibilities:
 | `/api/install-update` | POST | Install update from GitHub |
 | `/wifi/scan` | GET | Scan WiFi networks |
 | `/wifi/save` | POST | Save WiFi credentials |
+| `/eth/save` | POST | Save Ethernet DHCP/static settings (reboots) |
 | `/ota/upload` | POST | Upload firmware binary |
 | `/reboot` | POST | Trigger reboot |
 
