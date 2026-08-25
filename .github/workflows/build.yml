@@ -11,10 +11,17 @@ on:
 permissions:
   contents: write
   pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,10 +38,8 @@ jobs:
         id: version
         run: |
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            # For tagged releases, use the tag name
             VERSION="${{ github.ref_name }}"
           else
-            # For other builds, use git describe
             VERSION=$(git describe --always --dirty --tags)
           fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
@@ -59,25 +64,56 @@ jobs:
           name: firmware-${{ steps.version.outputs.version }}
           path: release/
 
-      - name: Prepare GitHub Pages
+      - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          make_latest: true
+
+  pages:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Prepare GitHub Pages
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.build.outputs.version }}"
           OWNER="${{ github.repository_owner }}"
           REPO="${GITHUB_REPOSITORY#*/}"
           PAGES_BASE="https://${OWNER}.github.io/${REPO}"
 
           PREV_VERSION="none"
           PREV_SIZE="0"
-          if [ -f docs/firmware.bin ]; then
-            cp docs/firmware.bin docs/firmware-previous.bin
-            if [ -f docs/version.json ]; then
-              PREV_VERSION=$(grep -o '"version"[^,]*' docs/version.json | cut -d'"' -f4 || echo "none")
-              PREV_SIZE=$(stat --printf="%s" docs/firmware-previous.bin 2>/dev/null || echo "0")
+          git fetch origin gh-pages --depth=1 || true
+          if git cat-file -e origin/gh-pages:firmware.bin 2>/dev/null; then
+            git show origin/gh-pages:firmware.bin > docs/firmware-previous.bin
+            PREV_SIZE=$(stat --printf="%s" docs/firmware-previous.bin)
+            if git cat-file -e origin/gh-pages:version.json 2>/dev/null; then
+              PREV_VERSION=$(git show origin/gh-pages:version.json | grep -o '"version"[^,]*' | cut -d'"' -f4 || echo "none")
             fi
           fi
 
           cp release/*.bin docs/
+          touch docs/.nojekyll
           SIZE=$(stat --printf="%s" release/firmware.bin)
 
           cat > docs/manifest.json << EOF
@@ -108,18 +144,23 @@ jobs:
           }
           EOF
 
-      - name: Deploy to GitHub Pages
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Mirror site to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./docs
           keep_files: true
 
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
         with:
-          files: release/*
-          generate_release_notes: true
-          make_latest: true
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
