@@ -1102,7 +1102,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         eth_ip_str);
     httpd_resp_sendstr_chunk(req, buf);
     {
-        char wd_disp[24];
+        char wd_disp[40];
         const char *wd_color;
         if (last_successful_connection_time == 0) {
             snprintf(wd_disp, sizeof(wd_disp), "Idle");
