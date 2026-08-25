@@ -72,7 +72,8 @@ The codebase is split into three modules with clear responsibilities:
 - **String escaping in web_ui.h**: Use single `%` for CSS/JS (not `%%`), only use `%%` in printf format strings
 - **OTA validation**: Firmware marked valid after Ethernet IP obtained to prevent rollback during WiFi config
 - **Buffer pool**: Pre-allocated buffers for proxy connections to avoid malloc per request
-- **Module initialization**: Call `remote_ota_init(eth_netif)` and `proxy_init(event_group, bit, &timestamp, eth_netif)` before starting services. HTTP and :443 bind Ethernet-only.
+- HTTP dashboard is bound to the Ethernet IP (lwip_bind wrap of :80). Port 443 proxy also binds Ethernet only.
+- Connection watchdog stays idle until the first successful Powerwall proxy, then reboots after `WATCHDOG_TIMEOUT_SEC` with no further success.
 - **Ethernet IP**: Default DHCP. Static config lives in NVS namespace `eth_config`. Apply with `esp_netif_dhcpc_stop` + `esp_netif_set_ip_info` before `esp_eth_start`. DHCP fallback is a one-shot NVS flag (`force_dhcp`) that ignores static for a single boot; saved static settings are not erased.
 - **Lockout recovery**: After static apply, ICMP-ping the gateway for `ETH_DHCP_FALLBACK_SEC`. HTTP `/api/status` or a successful proxy connection cancels fallback. Hold GPIO0 (BOOT) 15 seconds to force DHCP.
 

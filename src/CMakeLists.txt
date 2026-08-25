@@ -4,6 +4,10 @@ idf_component_register(
     REQUIRES esp_eth esp_wifi esp_netif lwip nvs_flash esp-tls esp_http_server esp_https_ota mbedtls
 )
 
+# Redirect lwIP bind() of :80 from INADDR_ANY to the Ethernet IP.
+# esp_http_server has no bind-address field in IDF 5.3.
+idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=lwip_bind" APPEND)
+
 # OTA URL, highest wins:
 #   1. REMOTE_OTA_VERSION_URL env (tagged CI)
 #   2. include/config.local.h (optional local override)

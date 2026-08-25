@@ -195,6 +195,7 @@ static esp_netif_t *wifi_netif = NULL;
 
 // OTA HTTP server handle
 static httpd_handle_t web_server = NULL;
+static uint32_t http_listen_addr = 0;  // IPv4 the HTTP socket is bound to (0 = not bound)
 
 // ===== NVS WiFi Credential Storage =====
 
@@ -2166,7 +2167,35 @@ static esp_err_t admin_password_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/** Start the HTTP server (port 80) - dashboard / OTA on Ethernet only */
+/** Start the HTTP server (port 80) - dashboard / OTA bound to Ethernet IP */
+
+/*
+ * esp_http_server always bind()s INADDR_ANY. Rewrite :80 binds to the Ethernet
+ * address so the dashboard is not reachable on the Tesla Wi‑Fi IP.
+ */
+extern int __real_lwip_bind(int s, const struct sockaddr *name, socklen_t namelen);
+
+int __wrap_lwip_bind(int s, const struct sockaddr *name, socklen_t namelen)
+{
+    if (name && namelen >= sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)name;
+        if (in->sin_port == htons(WEB_HTTP_PORT) && in->sin_addr.s_addr == htonl(INADDR_ANY)) {
+            esp_netif_ip_info_t ip;
+            if (eth_netif &&
+                esp_netif_get_ip_info(eth_netif, &ip) == ESP_OK &&
+                ip.ip.addr != 0) {
+                struct sockaddr_in rewritten = *in;
+                rewritten.sin_addr.s_addr = ip.ip.addr;
+                ESP_LOGI(TAG, "HTTP listen bound to " IPSTR ":%d (Ethernet)",
+                         IP2STR(&ip.ip), WEB_HTTP_PORT);
+                http_listen_addr = ip.ip.addr;
+                return __real_lwip_bind(s, (struct sockaddr *)&rewritten, sizeof(rewritten));
+            }
+        }
+    }
+    return __real_lwip_bind(s, name, namelen);
+}
+
 static bool http_local_ip_is_wifi(int sockfd)
 {
     struct sockaddr_in name;
@@ -2242,7 +2271,7 @@ static esp_err_t start_http_server(void)
 
 #undef AUTH_URI
 
-    ESP_LOGI(TAG, "HTTP server started on port %d (Ethernet only, admin auth %s)",
+    ESP_LOGI(TAG, "HTTP server started on port %d (Ethernet bind, admin auth %s)",
              WEB_HTTP_PORT, admin_configured ? "enabled" : "setup required");
     return ESP_OK;
 }
@@ -2308,6 +2337,13 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "ETHGW:" IPSTR, IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "~~~~~~~~~~~");
     xEventGroupSetBits(s_event_group, ETH_GOT_IP_BIT);
+
+    if (web_server && http_listen_addr != 0 &&
+        ip_info->ip.addr != 0 && ip_info->ip.addr != http_listen_addr) {
+        ESP_LOGW(TAG, "Ethernet IP changed; rebooting to rebind HTTP");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+    }
 }
 
 /** Event handler for WiFi events */
@@ -2622,27 +2658,23 @@ static void system_monitor_task(void *pvParameters)
     }
 }
 
-/** Connection watchdog task - reboots if no successful connections for extended period */
+/** Connection watchdog — armed only after the first successful Powerwall proxy */
 static void connection_watchdog_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Connection watchdog started (timeout: %d seconds)", WATCHDOG_TIMEOUT_SEC);
-
-    // Initialize last successful connection time to boot time
-    // This gives the system time to establish initial connections
-    last_successful_connection_time = esp_timer_get_time();
+    ESP_LOGI(TAG, "Connection watchdog idle until first successful Powerwall proxy (then %d s)",
+             WATCHDOG_TIMEOUT_SEC);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_INTERVAL_SEC * 1000));
 
-        // Check if WiFi is connected - only check watchdog when WiFi is up
-        EventBits_t bits = xEventGroupGetBits(s_event_group);
-        if ((bits & WIFI_CONNECTED_BIT) == 0) {
-            // WiFi not connected - don't trigger watchdog, reset timer
-            last_successful_connection_time = esp_timer_get_time();
+        if (last_successful_connection_time == 0) {
+            static int idle_logs = 0;
+            if ((++idle_logs % 5) == 0) {
+                ESP_LOGI(TAG, "Watchdog still idle — no Powerwall proxy traffic yet");
+            }
             continue;
         }
 
-        // Check time since last successful connection
         int64_t now = esp_timer_get_time();
         int64_t elapsed_sec = (now - last_successful_connection_time) / 1000000;
 

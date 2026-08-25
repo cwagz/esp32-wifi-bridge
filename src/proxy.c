@@ -112,8 +112,10 @@ static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_ou
     total_requests++;
     if (result == 0) {
         successful_requests++;
-        // Update watchdog timestamp
         if (proxy_watchdog_timestamp) {
+            if (*proxy_watchdog_timestamp == 0) {
+                ESP_LOGI(TAG, "Watchdog armed after first successful Powerwall proxy");
+            }
             *proxy_watchdog_timestamp = esp_timer_get_time();
         }
     } else {

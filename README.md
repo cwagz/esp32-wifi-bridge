@@ -62,7 +62,7 @@ The device provides a web-based dashboard on **Ethernet only** (port 80). Port 4
 - **WiFi Metrics**: 24-hour signal strength and connection history with 5-minute averages
 - **NTP Time Sync**: Automatic time synchronization over Ethernet (non-blocking)
 - **OTA Updates**: Upload firmware via web UI or remote GitHub releases
-- **Connection Watchdog**: Automatic reboot if proxy connections fail for extended periods
+- **Connection Watchdog**: After the first successful Powerwall proxy, reboot if none succeed for 10 minutes. Idle until that first client — setup will not reboot you.
 
 ## Architecture
 
