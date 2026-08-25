@@ -74,7 +74,7 @@ The codebase is split into three modules with clear responsibilities:
 - **Buffer pool**: Pre-allocated buffers for proxy connections to avoid malloc per request
 - **Module initialization**: Call `remote_ota_init(eth_netif)` and `proxy_init(event_group, bit, &timestamp, eth_netif)` before starting services. HTTP and :443 bind Ethernet-only.
 - **Ethernet IP**: Default DHCP. Static config lives in NVS namespace `eth_config`. Apply with `esp_netif_dhcpc_stop` + `esp_netif_set_ip_info` before `esp_eth_start`. DHCP fallback is a one-shot NVS flag (`force_dhcp`) that ignores static for a single boot; saved static settings are not erased.
-- **Lockout recovery**: After static apply, ICMP-ping the gateway for `ETH_DHCP_FALLBACK_SEC`. HTTP `/api/status` or a successful proxy connection cancels fallback. Hold GPIO0 (BOOT) 3 seconds to force DHCP.
+- **Lockout recovery**: After static apply, ICMP-ping the gateway for `ETH_DHCP_FALLBACK_SEC`. HTTP `/api/status` or a successful proxy connection cancels fallback. Hold GPIO0 (BOOT) 15 seconds to force DHCP.
 
 ## Hardware
 

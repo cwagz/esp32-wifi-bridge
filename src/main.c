@@ -730,20 +730,25 @@ static void eth_boot_button_task(void *pvParameters)
     gpio_config(&io);
 
     int held_ticks = 0;
+    const int hold_ticks = (ETH_BOOT_HOLD_SEC * 1000) / ETH_BOOT_POLL_MS;
     while (1) {
         if (gpio_get_level(ETH_BOOT_GPIO) == 0) {
             held_ticks++;
             if (held_ticks == 1) {
-                ESP_LOGI(TAG, "BOOT held - keep holding 3s to force DHCP and clear admin password");
+                ESP_LOGI(TAG, "BOOT held - keep holding %d seconds to force DHCP and clear admin password",
+                         ETH_BOOT_HOLD_SEC);
+            } else if (held_ticks < hold_ticks && (held_ticks * ETH_BOOT_POLL_MS) % 5000 == 0) {
+                ESP_LOGI(TAG, "BOOT held %ds / %ds",
+                         (held_ticks * ETH_BOOT_POLL_MS) / 1000, ETH_BOOT_HOLD_SEC);
             }
-            if (held_ticks >= 30) {
+            if (held_ticks >= hold_ticks) {
                 erase_admin_password();
-                request_dhcp_fallback_and_reboot("BOOT button held 3s (DHCP + admin reset)");
+                request_dhcp_fallback_and_reboot("BOOT button held (DHCP + admin reset)");
             }
         } else {
             held_ticks = 0;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(ETH_BOOT_POLL_MS));
     }
 }
 
@@ -1019,7 +1024,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">"
         "Device reboots to apply. If the gateway is unreachable for 45s with no LAN traffic, "
-        "it falls back to DHCP. Hold BOOT 3 seconds to force DHCP and clear the admin password.</div>"
+        "it falls back to DHCP. Hold BOOT 15 seconds to force DHCP and clear the admin password.</div>"
         "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save & Reboot</button>"
         "</form></div>");
 
@@ -1041,7 +1046,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
         ICON_UPDATE " Reboot</button></form>"
         "<hr><h2>" ICON_LOCK " Admin password</h2>"
-        "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold BOOT 3 seconds to clear the password if you get locked out.</p>"
+        "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold BOOT 15 seconds to clear the password if you get locked out.</p>"
         "<form method=\"POST\" action=\"/admin/password\">"
         "<div class=\"form-group\"><label class=\"label\">Current password</label>"
         "<input type=\"password\" name=\"current\" autocomplete=\"current-password\" class=\"mt-1\"></div>"
@@ -1619,7 +1624,7 @@ static esp_err_t eth_save_handler(httpd_req_t *req)
         "<h2>Applying Ethernet settings</h2>"
         "<p>Rebooting. New address: <strong>%s</strong></p>"
         "<p class=\"text-sm\">If the gateway is unreachable for 45s, the device falls back to DHCP. "
-        "Hold BOOT 3 seconds to force DHCP. mDNS: <a href=\"http://powerwall.local/\">powerwall.local</a></p>"
+        "Hold BOOT 15 seconds to force DHCP. mDNS: <a href=\"http://powerwall.local/\">powerwall.local</a></p>"
         "</div></body></html>",
         use_static ? ip : "powerwall.local", new_addr);
 
@@ -2094,7 +2099,7 @@ static esp_err_t admin_setup_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<p>Sign in as <code>" ADMIN_USERNAME "</code> with the password you just set.</p>"
         "<p class=\"text-xs text-muted\" style=\"margin:0.75rem 0\">"
-        "If you forget it, hold BOOT for 3 seconds to clear the password (also forces DHCP).</p>"
+        "If you forget it, hold BOOT for 15 seconds to clear the password (also forces DHCP).</p>"
         "<p><a class=\"btn btn-primary\" href=\"/\" style=\"display:inline-block;text-decoration:none;margin-top:0.75rem\">Continue to dashboard</a></p>");
     send_simple_page_end(req);
     return ESP_OK;

@@ -72,9 +72,16 @@
 #ifndef ETH_DHCP_FALLBACK_PING_INTERVAL_MS
 #define ETH_DHCP_FALLBACK_PING_INTERVAL_MS 3000
 #endif
-// Hold BOOT (GPIO0) for 3 seconds after the firmware is running to force DHCP.
+// Hold BOOT (GPIO0) this long after the firmware is running to force DHCP
+// and clear the admin password. Long enough that a bump will not trigger it.
 #ifndef ETH_BOOT_GPIO
 #define ETH_BOOT_GPIO 0
+#endif
+#ifndef ETH_BOOT_HOLD_SEC
+#define ETH_BOOT_HOLD_SEC 15
+#endif
+#ifndef ETH_BOOT_POLL_MS
+#define ETH_BOOT_POLL_MS 100
 #endif
 
 // ===== Proxy Server Configuration =====
