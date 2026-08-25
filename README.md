@@ -4,7 +4,7 @@
 
 **Flash directly from your browser (no tools required):**
 
-👉 **https://mccahan.github.io/esp32-wifi-bridge/**
+👉 **https://cwagz.github.io/esp32-wifi-bridge/**
 
 Connect your ESP32-S3-POE-ETH board via USB and click "Install". Works with Chrome, Edge, and Opera.
 

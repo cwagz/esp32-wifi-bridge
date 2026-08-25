@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+  pages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,7 +34,7 @@ jobs:
             VERSION="${{ github.ref_name }}"
           else
             # For other builds, use git describe
-            VERSION=$(git describe --always --dirty)
+            VERSION=$(git describe --always --dirty --tags)
           fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
@@ -57,10 +61,11 @@ jobs:
       - name: Prepare GitHub Pages
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          # Get version from tag
           VERSION="${{ steps.version.outputs.version }}"
+          OWNER="${{ github.repository_owner }}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          PAGES_BASE="https://${OWNER}.github.io/${REPO}"
 
-          # Preserve previous version before overwriting
           PREV_VERSION="none"
           PREV_SIZE="0"
           if [ -f docs/firmware.bin ]; then
@@ -71,13 +76,9 @@ jobs:
             fi
           fi
 
-          # Copy new binaries
           cp release/*.bin docs/
-
-          # Get firmware size
           SIZE=$(stat --printf="%s" release/firmware.bin)
 
-          # Generate ESP Web Tools manifest
           cat > docs/manifest.json << EOF
           {
             "name": "ESP32 WiFi Bridge",
@@ -95,15 +96,14 @@ jobs:
           }
           EOF
 
-          # Generate version.json for remote OTA
           cat > docs/version.json << EOF
           {
             "version": "${VERSION}",
             "size": ${SIZE},
-            "url": "https://mccahan.github.io/esp32-wifi-bridge/firmware.bin",
+            "url": "${PAGES_BASE}/firmware.bin",
             "previous_version": "${PREV_VERSION}",
             "previous_size": ${PREV_SIZE},
-            "previous_url": "https://mccahan.github.io/esp32-wifi-bridge/firmware-previous.bin"
+            "previous_url": "${PAGES_BASE}/firmware-previous.bin"
           }
           EOF
 
@@ -121,3 +121,4 @@ jobs:
         with:
           files: release/*
           generate_release_notes: true
+          make_latest: true

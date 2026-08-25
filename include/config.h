@@ -81,7 +81,7 @@
 
 // ===== Remote OTA Configuration =====
 // URL to check for firmware updates (GitHub Pages hosted version.json)
-#define REMOTE_OTA_VERSION_URL "https://mccahan.github.io/esp32-wifi-bridge/version.json"
+#define REMOTE_OTA_VERSION_URL "https://cwagz.github.io/esp32-wifi-bridge/version.json"
 
 // ===== HTTP Server Configuration =====
 // Web UI port for status page, API, WiFi config
