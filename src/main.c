@@ -1938,7 +1938,7 @@ static esp_err_t send_admin_setup_page(httpd_req_t *req, const char *error_msg)
 
 static bool require_admin(httpd_req_t *req)
 {
-    const char *uri = req->uri ? req->uri : "";
+    const char *uri = req->uri;
 
     if (strcmp(uri, "/favicon.ico") == 0) {
         return true;
@@ -2009,7 +2009,7 @@ static esp_err_t with_admin(httpd_req_t *req)
     if (!require_admin(req)) {
         return ESP_FAIL;
     }
-    httpd_uri_handler_t inner = (httpd_uri_handler_t)req->user_ctx;
+    esp_err_t (*inner)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
     return inner(req);
 }
 
