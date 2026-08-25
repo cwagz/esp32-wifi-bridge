@@ -28,7 +28,7 @@ pio device monitor         # Serial monitor
 - **Ethernet (W5500 via SPI)**: Connected to user's network with internet access
 - **WiFi**: Connected to Powerwall's isolated network (192.168.91.x, no internet)
 - **Proxy**: TCP passthrough on port 443, no TLS termination
-- **Web UI**: Status dashboard and OTA updates on port 80 (Ethernet only)
+- **Web UI**: Status dashboard and OTA updates on port 80. HTTP Basic Auth (username `admin`); first boot must set a password. Port 443 is unauthenticated passthrough.
 
 ## Source Files
 

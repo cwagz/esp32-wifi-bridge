@@ -38,6 +38,8 @@
 
 #define ICON_HISTORY "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M12 4a8 8 0 00-8 8H1l4 4 4-4H6a6 6 0 116 6v2a8 8 0 000-16zm-1 5v4l3 2 1-1-2.5-1.5V9h-1.5z\"/></svg>"
 
+#define ICON_LOCK "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M17 8h-1V6a4 4 0 00-8 0v2H7a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2V10a2 2 0 00-2-2zM9 6a3 3 0 016 0v2H9V6zm3 9a1.5 1.5 0 110-3 1.5 1.5 0 010 3z\"/></svg>"
+
 #define ICON_WARN "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z\"/></svg>"
 
 #define ICON_EXPAND "<svg class=\"i\" style=\"width:.6rem;height:.6rem\" viewBox=\"0 0 24 24\"><path d=\"M7 10l5 5 5-5H7z\"/></svg>"

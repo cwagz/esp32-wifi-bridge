@@ -7,6 +7,7 @@
  */
 
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <fcntl.h>
 #include "freertos/FreeRTOS.h"
@@ -36,6 +37,9 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
+#include "esp_random.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/base64.h"
 
 #include "config.h"
 #include "web_ui.h"
@@ -60,6 +64,12 @@ static const char *TAG = "wifi-eth-bridge";
 #define NVS_KEY_ETH_FORCE_DHCP "force_dhcp"
 #define NVS_KEY_ETH_FELL_BACK "fell_back"
 
+#define NVS_ADMIN_NAMESPACE "admin"
+#define NVS_KEY_ADMIN_SALT "salt"
+#define NVS_KEY_ADMIN_HASH "hash"
+#define ADMIN_SALT_LEN 16
+#define ADMIN_HASH_LEN 32
+
 // WiFi credentials (runtime, loaded from NVS)
 static char wifi_ssid[33] = "";
 static char wifi_password[65] = "";
@@ -78,6 +88,10 @@ typedef struct {
 
 static eth_lan_config_t eth_cfg = {0};
 static volatile bool eth_lan_confirmed = false;  // HTTP or proxy traffic seen
+
+static uint8_t admin_salt[ADMIN_SALT_LEN];
+static uint8_t admin_hash[ADMIN_HASH_LEN];
+static bool admin_configured = false;
 
 // Powerwall connectivity status
 static volatile bool powerwall_reachable = false;
@@ -300,6 +314,107 @@ static bool form_get(const char *body, const char *key, char *out, size_t out_le
     out[len] = '\0';
     url_decode_inplace(out);
     return true;
+}
+
+static bool hash_equal(const uint8_t *a, const uint8_t *b, size_t n)
+{
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+static void hash_admin_password(const char *password, const uint8_t salt[ADMIN_SALT_LEN],
+                                uint8_t out[ADMIN_HASH_LEN])
+{
+    unsigned char buf[ADMIN_SALT_LEN + ADMIN_MAX_PASSWORD_LEN];
+    size_t plen = strlen(password);
+    if (plen > ADMIN_MAX_PASSWORD_LEN) plen = ADMIN_MAX_PASSWORD_LEN;
+    memcpy(buf, salt, ADMIN_SALT_LEN);
+    memcpy(buf + ADMIN_SALT_LEN, password, plen);
+    mbedtls_sha256(buf, ADMIN_SALT_LEN + plen, out, 0);
+    memset(buf, 0, sizeof(buf));
+}
+
+static void load_admin_config(void)
+{
+    memset(admin_salt, 0, sizeof(admin_salt));
+    memset(admin_hash, 0, sizeof(admin_hash));
+    admin_configured = false;
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_ADMIN_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        ESP_LOGI(TAG, "No admin password set - first-boot setup required");
+        return;
+    }
+
+    size_t salt_len = ADMIN_SALT_LEN;
+    size_t hash_len = ADMIN_HASH_LEN;
+    esp_err_t salt_err = nvs_get_blob(h, NVS_KEY_ADMIN_SALT, admin_salt, &salt_len);
+    esp_err_t hash_err = nvs_get_blob(h, NVS_KEY_ADMIN_HASH, admin_hash, &hash_len);
+    nvs_close(h);
+
+    if (salt_err == ESP_OK && hash_err == ESP_OK &&
+        salt_len == ADMIN_SALT_LEN && hash_len == ADMIN_HASH_LEN) {
+        admin_configured = true;
+        ESP_LOGI(TAG, "Admin password is configured");
+    } else {
+        ESP_LOGI(TAG, "No admin password set - first-boot setup required");
+    }
+}
+
+static esp_err_t save_admin_password(const char *password)
+{
+    uint8_t new_salt[ADMIN_SALT_LEN];
+    uint8_t new_hash[ADMIN_HASH_LEN];
+    esp_fill_random(new_salt, sizeof(new_salt));
+    hash_admin_password(password, new_salt, new_hash);
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_ADMIN_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_blob(h, NVS_KEY_ADMIN_SALT, new_salt, sizeof(new_salt));
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, NVS_KEY_ADMIN_HASH, new_hash, sizeof(new_hash));
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+
+    if (err == ESP_OK) {
+        memcpy(admin_salt, new_salt, sizeof(admin_salt));
+        memcpy(admin_hash, new_hash, sizeof(admin_hash));
+        admin_configured = true;
+        ESP_LOGI(TAG, "Admin password saved");
+    } else {
+        ESP_LOGE(TAG, "Failed to save admin password: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static void erase_admin_password(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_ADMIN_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, NVS_KEY_ADMIN_SALT);
+        nvs_erase_key(h, NVS_KEY_ADMIN_HASH);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    memset(admin_salt, 0, sizeof(admin_salt));
+    memset(admin_hash, 0, sizeof(admin_hash));
+    admin_configured = false;
+    ESP_LOGW(TAG, "Admin password cleared");
+}
+
+static bool admin_password_valid(const char *password)
+{
+    if (!password) return false;
+    size_t len = strlen(password);
+    return len >= ADMIN_MIN_PASSWORD_LEN && len <= ADMIN_MAX_PASSWORD_LEN;
 }
 
 static bool ipv4_parse_ok(const char *s, esp_ip4_addr_t *out)
@@ -619,10 +734,11 @@ static void eth_boot_button_task(void *pvParameters)
         if (gpio_get_level(ETH_BOOT_GPIO) == 0) {
             held_ticks++;
             if (held_ticks == 1) {
-                ESP_LOGI(TAG, "BOOT held - keep holding 3s to force DHCP");
+                ESP_LOGI(TAG, "BOOT held - keep holding 3s to force DHCP and clear admin password");
             }
             if (held_ticks >= 30) {
-                request_dhcp_fallback_and_reboot("BOOT button held 3s");
+                erase_admin_password();
+                request_dhcp_fallback_and_reboot("BOOT button held 3s (DHCP + admin reset)");
             }
         } else {
             held_ticks = 0;
@@ -699,14 +815,20 @@ static esp_err_t favicon_handler(httpd_req_t *req)
 }
 
 /** OTA status page - modern dark theme with WiFi config */
+static esp_err_t send_admin_setup_page(httpd_req_t *req, const char *error_msg);
+
 static esp_err_t ota_status_handler(httpd_req_t *req)
 {
+    eth_lan_confirmed = true;
+
+    if (!admin_configured) {
+        return send_admin_setup_page(req, NULL);
+    }
+
     const esp_app_desc_t *app_desc = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t ota_state;
     esp_ota_get_state_partition(running, &ota_state);
-
-    eth_lan_confirmed = true;
 
     // Get WiFi status
     EventBits_t bits = xEventGroupGetBits(s_event_group);
@@ -897,7 +1019,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">"
         "Device reboots to apply. If the gateway is unreachable for 45s with no LAN traffic, "
-        "it falls back to DHCP. Hold BOOT 3 seconds to force DHCP.</div>"
+        "it falls back to DHCP. Hold BOOT 3 seconds to force DHCP and clear the admin password.</div>"
         "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save & Reboot</button>"
         "</form></div>");
 
@@ -917,7 +1039,18 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
-        ICON_UPDATE " Reboot</button></form></div>");
+        ICON_UPDATE " Reboot</button></form>"
+        "<hr><h2>" ICON_LOCK " Admin password</h2>"
+        "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold BOOT 3 seconds to clear the password if you get locked out.</p>"
+        "<form method=\"POST\" action=\"/admin/password\">"
+        "<div class=\"form-group\"><label class=\"label\">Current password</label>"
+        "<input type=\"password\" name=\"current\" autocomplete=\"current-password\" class=\"mt-1\"></div>"
+        "<div class=\"form-group\"><label class=\"label\">New password</label>"
+        "<input type=\"password\" name=\"password\" minlength=\"8\" maxlength=\"64\" autocomplete=\"new-password\" class=\"mt-1\"></div>"
+        "<div class=\"form-group\"><label class=\"label\">Confirm new password</label>"
+        "<input type=\"password\" name=\"password2\" minlength=\"8\" maxlength=\"64\" autocomplete=\"new-password\" class=\"mt-1\"></div>"
+        "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Change password</button>"
+        "</form></div>");
 
     // Statistics card
     {
@@ -1311,7 +1444,7 @@ static esp_err_t wifi_save_handler(httpd_req_t *req)
     }
     content[received] = '\0';
 
-    ESP_LOGI(TAG, "WiFi save request: %s", content);
+    ESP_LOGI(TAG, "WiFi save request for SSID (password not logged)");
 
     // Parse form data (ssid=xxx&password=xxx)
     char new_ssid[33] = {0};
@@ -1756,13 +1889,249 @@ static esp_err_t ota_rollback_handler(httpd_req_t *req)
 
 // Remote OTA handlers are in remote_ota.c
 
+static void send_simple_page_begin(httpd_req_t *req, const char *title)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr_chunk(req,
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"" FAVICON_SVG "\">"
+        "<title>");
+    httpd_resp_sendstr_chunk(req, title);
+    httpd_resp_sendstr_chunk(req, "</title><style>");
+    httpd_resp_sendstr_chunk(req, DARK_CSS);
+    httpd_resp_sendstr_chunk(req,
+        "svg.i{width:1.125rem;height:1.125rem;vertical-align:middle;margin-right:0.25rem;fill:currentColor}"
+        "</style></head><body><div class=\"container\"><div class=\"card\">");
+}
+
+static void send_simple_page_end(httpd_req_t *req)
+{
+    httpd_resp_sendstr_chunk(req, "</div></div></body></html>");
+    httpd_resp_sendstr_chunk(req, NULL);
+}
+
+static esp_err_t send_admin_setup_page(httpd_req_t *req, const char *error_msg)
+{
+    send_simple_page_begin(req, "Set admin password");
+    httpd_resp_sendstr_chunk(req, "<h1>" ICON_LOCK " Set admin password</h1>");
+    httpd_resp_sendstr_chunk(req,
+        "<p class=\"text-sm text-muted\" style=\"margin-bottom:1rem\">"
+        "Protects the dashboard, WiFi/Ethernet settings, and firmware updates. "
+        "The Powerwall data stream on port 443 is not affected. "
+        "Username is <code>" ADMIN_USERNAME "</code>.</p>");
+    if (error_msg && error_msg[0]) {
+        httpd_resp_sendstr_chunk(req, "<div class=\"alert alert-warn\" style=\"margin-bottom:0.75rem\">" ICON_WARN " ");
+        httpd_resp_sendstr_chunk(req, error_msg);
+        httpd_resp_sendstr_chunk(req, "</div>");
+    }
+    httpd_resp_sendstr_chunk(req,
+        "<form method=\"POST\" action=\"/admin/setup\">"
+        "<div class=\"form-group\"><label class=\"label\">Password (min 8 characters)</label>"
+        "<input type=\"password\" name=\"password\" minlength=\"8\" maxlength=\"64\" required autocomplete=\"new-password\" class=\"mt-1\"></div>"
+        "<div class=\"form-group\"><label class=\"label\">Confirm password</label>"
+        "<input type=\"password\" name=\"password2\" minlength=\"8\" maxlength=\"64\" required autocomplete=\"new-password\" class=\"mt-1\"></div>"
+        "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save password</button>"
+        "</form>");
+    send_simple_page_end(req);
+    return ESP_OK;
+}
+
+static bool require_admin(httpd_req_t *req)
+{
+    const char *uri = req->uri ? req->uri : "";
+
+    if (strcmp(uri, "/favicon.ico") == 0) {
+        return true;
+    }
+
+    if (!admin_configured) {
+        bool allowed = (req->method == HTTP_GET && strcmp(uri, "/") == 0) ||
+                       (req->method == HTTP_POST && strcmp(uri, "/admin/setup") == 0);
+        if (allowed) {
+            return true;
+        }
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", "/");
+        httpd_resp_send(req, NULL, 0);
+        return false;
+    }
+
+    char hdr[160] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
+        goto unauthorized;
+    }
+
+    if (strncasecmp(hdr, "Basic ", 6) != 0) {
+        goto unauthorized;
+    }
+    const char *b64 = hdr + 6;
+    while (*b64 == ' ') b64++;
+
+    unsigned char decoded[ADMIN_MAX_PASSWORD_LEN + 16];
+    size_t decoded_len = 0;
+    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
+                              (const unsigned char *)b64, strlen(b64)) != 0) {
+        goto unauthorized;
+    }
+    decoded[decoded_len] = '\0';
+
+    const char *prefix = ADMIN_USERNAME ":";
+    size_t prefix_len = strlen(prefix);
+    bool user_ok = decoded_len > prefix_len &&
+                   strncmp((const char *)decoded, prefix, prefix_len) == 0;
+    bool pass_ok = false;
+    if (user_ok) {
+        const char *password = (const char *)decoded + prefix_len;
+        uint8_t got[ADMIN_HASH_LEN];
+        hash_admin_password(password, admin_salt, got);
+        pass_ok = hash_equal(got, admin_hash, ADMIN_HASH_LEN);
+        memset(got, 0, sizeof(got));
+    }
+    memset(decoded, 0, sizeof(decoded));
+    memset(hdr, 0, sizeof(hdr));
+
+    if (user_ok && pass_ok) {
+        return true;
+    }
+
+unauthorized:
+    memset(hdr, 0, sizeof(hdr));
+    vTaskDelay(pdMS_TO_TICKS(ADMIN_AUTH_FAIL_DELAY_MS));
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Powerwall Bridge\"");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "Unauthorized");
+    return false;
+}
+
+static esp_err_t with_admin(httpd_req_t *req)
+{
+    if (!require_admin(req)) {
+        return ESP_FAIL;
+    }
+    httpd_uri_handler_t inner = (httpd_uri_handler_t)req->user_ctx;
+    return inner(req);
+}
+
+static esp_err_t admin_setup_handler(httpd_req_t *req)
+{
+    if (admin_configured) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Password already set");
+        return ESP_FAIL;
+    }
+
+    char content[192];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        return send_admin_setup_page(req, "No data received");
+    }
+    content[received] = '\0';
+
+    char password[ADMIN_MAX_PASSWORD_LEN + 1] = {0};
+    char password2[ADMIN_MAX_PASSWORD_LEN + 1] = {0};
+    form_get(content, "password", password, sizeof(password));
+    form_get(content, "password2", password2, sizeof(password2));
+    memset(content, 0, sizeof(content));
+
+    const char *err = NULL;
+    if (!admin_password_valid(password)) {
+        err = "Password must be 8–64 characters";
+    } else if (strcmp(password, password2) != 0) {
+        err = "Passwords do not match";
+    }
+
+    if (err) {
+        memset(password, 0, sizeof(password));
+        memset(password2, 0, sizeof(password2));
+        return send_admin_setup_page(req, err);
+    }
+
+    esp_err_t save_err = save_admin_password(password);
+    memset(password, 0, sizeof(password));
+    memset(password2, 0, sizeof(password2));
+    if (save_err != ESP_OK) {
+        return send_admin_setup_page(req, "Failed to save password");
+    }
+
+    send_simple_page_begin(req, "Password saved");
+    httpd_resp_sendstr_chunk(req, "<h1>" ICON_LOCK " Password saved</h1>");
+    httpd_resp_sendstr_chunk(req,
+        "<p>Sign in as <code>" ADMIN_USERNAME "</code> with the password you just set.</p>"
+        "<p class=\"text-xs text-muted\" style=\"margin:0.75rem 0\">"
+        "If you forget it, hold BOOT for 3 seconds to clear the password (also forces DHCP).</p>"
+        "<p><a class=\"btn btn-primary\" href=\"/\" style=\"display:inline-block;text-decoration:none;margin-top:0.75rem\">Continue to dashboard</a></p>");
+    send_simple_page_end(req);
+    return ESP_OK;
+}
+
+static esp_err_t admin_password_handler(httpd_req_t *req)
+{
+    char content[256];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    content[received] = '\0';
+
+    char current[ADMIN_MAX_PASSWORD_LEN + 1] = {0};
+    char password[ADMIN_MAX_PASSWORD_LEN + 1] = {0};
+    char password2[ADMIN_MAX_PASSWORD_LEN + 1] = {0};
+    form_get(content, "current", current, sizeof(current));
+    form_get(content, "password", password, sizeof(password));
+    form_get(content, "password2", password2, sizeof(password2));
+    memset(content, 0, sizeof(content));
+
+    uint8_t got[ADMIN_HASH_LEN];
+    hash_admin_password(current, admin_salt, got);
+    bool current_ok = hash_equal(got, admin_hash, ADMIN_HASH_LEN);
+    memset(got, 0, sizeof(got));
+    memset(current, 0, sizeof(current));
+
+    const char *err = NULL;
+    if (!current_ok) {
+        err = "Current password is incorrect";
+    } else if (!admin_password_valid(password)) {
+        err = "New password must be 8–64 characters";
+    } else if (strcmp(password, password2) != 0) {
+        err = "New passwords do not match";
+    }
+
+    if (err) {
+        memset(password, 0, sizeof(password));
+        memset(password2, 0, sizeof(password2));
+        send_simple_page_begin(req, "Password not changed");
+        httpd_resp_sendstr_chunk(req, "<h1>" ICON_WARN " Password not changed</h1><p>");
+        httpd_resp_sendstr_chunk(req, err);
+        httpd_resp_sendstr_chunk(req, "</p><p><a href=\"/\">Back</a></p>");
+        send_simple_page_end(req);
+        return ESP_OK;
+    }
+
+    esp_err_t save_err = save_admin_password(password);
+    memset(password, 0, sizeof(password));
+    memset(password2, 0, sizeof(password2));
+    if (save_err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    send_simple_page_begin(req, "Password changed");
+    httpd_resp_sendstr_chunk(req,
+        "<h1>" ICON_LOCK " Password changed</h1>"
+        "<p>Reload the dashboard and sign in as <code>" ADMIN_USERNAME "</code> with the new password.</p>"
+        "<p><a class=\"btn btn-primary\" href=\"/\" style=\"display:inline-block;text-decoration:none;margin-top:0.75rem\">Back to dashboard</a></p>");
+    send_simple_page_end(req);
+    return ESP_OK;
+}
+
 /** Start the HTTP server (port 80) - serves web UI and OTA */
 static esp_err_t start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WEB_HTTP_PORT;
     config.stack_size = 8192;
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 24;
 
     esp_err_t err = httpd_start(&web_server, &config);
     if (err != ESP_OK) {
@@ -1770,7 +2139,6 @@ static esp_err_t start_http_server(void)
         return err;
     }
 
-    // Favicon
     httpd_uri_t favicon = {
         .uri = "/favicon.ico",
         .method = HTTP_GET,
@@ -1778,126 +2146,34 @@ static esp_err_t start_http_server(void)
     };
     httpd_register_uri_handler(web_server, &favicon);
 
-    // Main status page
-    httpd_uri_t status_page = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = ota_status_handler,
-    };
-    httpd_register_uri_handler(web_server, &status_page);
+#define AUTH_URI(path, meth, fn) do { \
+        httpd_uri_t _u = { .uri = (path), .method = (meth), .handler = with_admin, .user_ctx = (void *)(fn) }; \
+        httpd_register_uri_handler(web_server, &_u); \
+    } while (0)
 
-    // OTA upload endpoint
-    httpd_uri_t ota_upload = {
-        .uri = "/ota/upload",
-        .method = HTTP_POST,
-        .handler = ota_upload_handler,
-    };
-    httpd_register_uri_handler(web_server, &ota_upload);
+    AUTH_URI("/", HTTP_GET, ota_status_handler);
+    AUTH_URI("/ota/upload", HTTP_POST, ota_upload_handler);
+    AUTH_URI("/ota/rollback", HTTP_POST, ota_rollback_handler);
+    AUTH_URI("/reboot", HTTP_POST, reboot_handler);
+    AUTH_URI("/wifi/scan", HTTP_GET, wifi_scan_handler);
+    AUTH_URI("/wifi/save", HTTP_POST, wifi_save_handler);
+    AUTH_URI("/eth/save", HTTP_POST, eth_save_handler);
+    AUTH_URI("/api/status", HTTP_GET, api_status_handler);
+    AUTH_URI("/api/rssi", HTTP_GET, api_rssi_handler);
+    AUTH_URI("/api/requests", HTTP_GET, api_requests_handler);
+    AUTH_URI("/api/logs", HTTP_GET, api_logs_handler);
+    AUTH_URI("/api/wifi-history", HTTP_GET, api_wifi_history_handler);
+    AUTH_URI("/api/update", HTTP_GET, api_update_status_handler);
+    AUTH_URI("/api/check-update", HTTP_POST, api_check_update_handler);
+    AUTH_URI("/api/install-update", HTTP_POST, api_install_update_handler);
+    AUTH_URI("/api/revert", HTTP_POST, api_revert_handler);
+    AUTH_URI("/admin/setup", HTTP_POST, admin_setup_handler);
+    AUTH_URI("/admin/password", HTTP_POST, admin_password_handler);
 
-    // OTA rollback endpoint
-    httpd_uri_t ota_rollback = {
-        .uri = "/ota/rollback",
-        .method = HTTP_POST,
-        .handler = ota_rollback_handler,
-    };
-    httpd_register_uri_handler(web_server, &ota_rollback);
+#undef AUTH_URI
 
-    // Reboot endpoint
-    httpd_uri_t reboot = {
-        .uri = "/reboot",
-        .method = HTTP_POST,
-        .handler = reboot_handler,
-    };
-    httpd_register_uri_handler(web_server, &reboot);
-
-    // WiFi configuration endpoints
-    httpd_uri_t wifi_scan = {
-        .uri = "/wifi/scan",
-        .method = HTTP_GET,
-        .handler = wifi_scan_handler,
-    };
-    httpd_register_uri_handler(web_server, &wifi_scan);
-
-    httpd_uri_t wifi_save = {
-        .uri = "/wifi/save",
-        .method = HTTP_POST,
-        .handler = wifi_save_handler,
-    };
-    httpd_register_uri_handler(web_server, &wifi_save);
-
-    httpd_uri_t eth_save = {
-        .uri = "/eth/save",
-        .method = HTTP_POST,
-        .handler = eth_save_handler,
-    };
-    httpd_register_uri_handler(web_server, &eth_save);
-
-    // API endpoints
-    httpd_uri_t api_status = {
-        .uri = "/api/status",
-        .method = HTTP_GET,
-        .handler = api_status_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_status);
-
-    httpd_uri_t api_rssi = {
-        .uri = "/api/rssi",
-        .method = HTTP_GET,
-        .handler = api_rssi_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_rssi);
-
-    httpd_uri_t api_requests = {
-        .uri = "/api/requests",
-        .method = HTTP_GET,
-        .handler = api_requests_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_requests);
-
-    httpd_uri_t api_logs = {
-        .uri = "/api/logs",
-        .method = HTTP_GET,
-        .handler = api_logs_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_logs);
-
-    httpd_uri_t api_wifi_history = {
-        .uri = "/api/wifi-history",
-        .method = HTTP_GET,
-        .handler = api_wifi_history_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_wifi_history);
-
-    // Remote OTA endpoints
-    httpd_uri_t api_update = {
-        .uri = "/api/update",
-        .method = HTTP_GET,
-        .handler = api_update_status_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_update);
-
-    httpd_uri_t api_check_update = {
-        .uri = "/api/check-update",
-        .method = HTTP_POST,
-        .handler = api_check_update_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_check_update);
-
-    httpd_uri_t api_install_update = {
-        .uri = "/api/install-update",
-        .method = HTTP_POST,
-        .handler = api_install_update_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_install_update);
-
-    httpd_uri_t api_revert = {
-        .uri = "/api/revert",
-        .method = HTTP_POST,
-        .handler = api_revert_handler,
-    };
-    httpd_register_uri_handler(web_server, &api_revert);
-
-    ESP_LOGI(TAG, "HTTP server started on port %d", WEB_HTTP_PORT);
+    ESP_LOGI(TAG, "HTTP server started on port %d (admin auth %s)",
+             WEB_HTTP_PORT, admin_configured ? "enabled" : "setup required");
     return ESP_OK;
 }
 
@@ -2387,6 +2663,8 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    load_admin_config();
 
     // Initialize Ethernet first (OTA server runs on Ethernet)
     ESP_ERROR_CHECK(init_ethernet());

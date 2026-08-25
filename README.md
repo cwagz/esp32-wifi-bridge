@@ -51,9 +51,10 @@ The device provides a web-based dashboard accessible on the Ethernet interface s
 - **SSL Passthrough**: Forwards encrypted SSL/TLS traffic without decryption
 - **TTL Modification**: Modifies Time-To-Live on outgoing packets to hide external origin
 - **Ethernet IP**: DHCP by default; optional static IP (address, mask, gateway, DNS) via the web UI
-- **DHCP fallback**: If a static IP is set and the gateway is unreachable for 45s with no LAN traffic, the device reboots into DHCP. Saved static settings are kept. Hold **BOOT for 3 seconds** to force DHCP.
+- **DHCP fallback**: If a static IP is set and the gateway is unreachable for 45s with no LAN traffic, the device reboots into DHCP. Saved static settings are kept. Hold **BOOT for 3 seconds** to force DHCP **and** clear the admin password.
 - **mDNS**: Advertises `powerwall.local` with "_powerwall" service on Ethernet interface
 - **Web Dashboard**: Real-time status page with auto-refresh
+- **Admin password**: HTTP Basic Auth on port 80 (username `admin`). First boot asks you to set it. Hold **BOOT for 3 seconds** to clear it (also forces DHCP).
 - **WiFi Metrics**: 24-hour signal strength and connection history with 5-minute averages
 - **NTP Time Sync**: Automatic time synchronization over Ethernet (non-blocking)
 - **OTA Updates**: Upload firmware via web UI or remote GitHub releases
@@ -79,6 +80,8 @@ This implementation provides **SSL passthrough with TTL modification**:
 
 Access the dashboard at `http://powerwall.local/` or `http://<ethernet-ip>/`
 
+On first boot you will be asked to set an admin password. After that the browser prompts for username **`admin`** and that password. Port 443 (Powerwall traffic) is not authenticated.
+
 Features:
 - Real-time WiFi and Powerwall status
 - Ethernet IP status (click to configure DHCP vs static)
@@ -93,7 +96,14 @@ Features:
 1. Open the dashboard and click the **Ethernet** tile.
 2. Choose **Static IP**, fill in address / mask / gateway / DNS.
 3. Save — the device reboots onto the new address.
-4. If you cannot reach it, wait ~45 seconds for DHCP fallback, or hold **BOOT** for 3 seconds.
+4. If you cannot reach it, wait ~45 seconds for DHCP fallback, or hold **BOOT** for 3 seconds (also clears the admin password).
+
+### Admin password
+
+1. First visit to `http://powerwall.local/` shows **Set admin password**.
+2. Username is always `admin`. Password is stored as a salted SHA-256 hash in NVS (not in the firmware image).
+3. Change it later from the System card on the dashboard.
+4. Locked out? Hold **BOOT for 3 seconds** — that clears the password and forces DHCP, then set a new one.
 
 ### API Endpoints
 
@@ -110,6 +120,8 @@ Features:
 | `/wifi/scan` | GET | Scan available WiFi networks |
 | `/wifi/save` | POST | Save WiFi credentials |
 | `/eth/save` | POST | Save Ethernet DHCP/static settings (reboots) |
+| `/admin/setup` | POST | Set admin password (first boot only) |
+| `/admin/password` | POST | Change admin password |
 | `/ota/upload` | POST | Upload firmware binary |
 | `/reboot` | POST | Trigger device reboot |
 
