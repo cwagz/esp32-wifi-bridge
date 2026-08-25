@@ -50,10 +50,34 @@ static const char *TAG = "wifi-eth-bridge";
 #define NVS_KEY_SSID "ssid"
 #define NVS_KEY_PASSWORD "password"
 
+// NVS namespace for Ethernet LAN settings
+#define NVS_ETH_NAMESPACE "eth_config"
+#define NVS_KEY_ETH_STATIC "static"
+#define NVS_KEY_ETH_IP "ip"
+#define NVS_KEY_ETH_MASK "mask"
+#define NVS_KEY_ETH_GW "gw"
+#define NVS_KEY_ETH_DNS "dns"
+#define NVS_KEY_ETH_FORCE_DHCP "force_dhcp"
+#define NVS_KEY_ETH_FELL_BACK "fell_back"
+
 // WiFi credentials (runtime, loaded from NVS)
 static char wifi_ssid[33] = "";
 static char wifi_password[65] = "";
 static bool wifi_configured = false;  // True if credentials saved in NVS
+
+// Ethernet LAN configuration (runtime, loaded from NVS)
+typedef struct {
+    bool use_static;            // Saved preference: static vs DHCP
+    bool using_fallback;        // This boot is on DHCP due to fallback/BOOT
+    bool fell_back_last_boot;   // Sticky UI warning until the user saves
+    char ip[16];
+    char netmask[16];
+    char gateway[16];
+    char dns[16];
+} eth_lan_config_t;
+
+static eth_lan_config_t eth_cfg = {0};
+static volatile bool eth_lan_confirmed = false;  // HTTP or proxy traffic seen
 
 // Powerwall connectivity status
 static volatile bool powerwall_reachable = false;
@@ -226,6 +250,387 @@ static esp_err_t save_wifi_credentials(const char *ssid, const char *password)
     return err;
 }
 
+// ===== Ethernet LAN (static IP / DHCP fallback) =====
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static void url_decode_inplace(char *s)
+{
+    char *r = s, *w = s;
+    while (*r) {
+        if (*r == '+') {
+            *w++ = ' ';
+            r++;
+        } else if (*r == '%' && r[1] && r[2]) {
+            int hi = hex_nibble(r[1]);
+            int lo = hex_nibble(r[2]);
+            if (hi >= 0 && lo >= 0) {
+                *w++ = (char)((hi << 4) | lo);
+                r += 3;
+            } else {
+                *w++ = *r++;
+            }
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+}
+
+static bool form_get(const char *body, const char *key, char *out, size_t out_len)
+{
+    char pattern[40];
+    snprintf(pattern, sizeof(pattern), "%s=", key);
+    const char *start = strstr(body, pattern);
+    if (!start) {
+        if (out_len) out[0] = '\0';
+        return false;
+    }
+    start += strlen(pattern);
+    const char *end = strchr(start, '&');
+    size_t len = end ? (size_t)(end - start) : strlen(start);
+    if (len >= out_len) len = out_len - 1;
+    memcpy(out, start, len);
+    out[len] = '\0';
+    url_decode_inplace(out);
+    return true;
+}
+
+static bool ipv4_parse_ok(const char *s, esp_ip4_addr_t *out)
+{
+    if (!s || s[0] == '\0') return false;
+    esp_ip4_addr_t tmp;
+    if (esp_netif_str_to_ip4(s, &tmp) != ESP_OK) return false;
+    if (out) *out = tmp;
+    return true;
+}
+
+static bool eth_static_config_valid(const eth_lan_config_t *cfg)
+{
+    esp_ip4_addr_t ip, mask;
+    if (!ipv4_parse_ok(cfg->ip, &ip) || !ipv4_parse_ok(cfg->netmask, &mask)) {
+        return false;
+    }
+    if (ip.addr == 0 || ip.addr == 0xFFFFFFFFu) return false;
+    if (mask.addr == 0) return false;
+    if (cfg->gateway[0] && !ipv4_parse_ok(cfg->gateway, NULL)) return false;
+    if (cfg->dns[0] && !ipv4_parse_ok(cfg->dns, NULL)) return false;
+    return true;
+}
+
+static void load_eth_config(void)
+{
+    memset(&eth_cfg, 0, sizeof(eth_cfg));
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_ETH_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        ESP_LOGI(TAG, "No saved Ethernet IP config (using DHCP)");
+        return;
+    }
+
+    uint8_t st = 0, force = 0, fell = 0;
+    nvs_get_u8(h, NVS_KEY_ETH_STATIC, &st);
+    nvs_get_u8(h, NVS_KEY_ETH_FORCE_DHCP, &force);
+    nvs_get_u8(h, NVS_KEY_ETH_FELL_BACK, &fell);
+
+    size_t len = sizeof(eth_cfg.ip);
+    nvs_get_str(h, NVS_KEY_ETH_IP, eth_cfg.ip, &len);
+    len = sizeof(eth_cfg.netmask);
+    nvs_get_str(h, NVS_KEY_ETH_MASK, eth_cfg.netmask, &len);
+    len = sizeof(eth_cfg.gateway);
+    nvs_get_str(h, NVS_KEY_ETH_GW, eth_cfg.gateway, &len);
+    len = sizeof(eth_cfg.dns);
+    nvs_get_str(h, NVS_KEY_ETH_DNS, eth_cfg.dns, &len);
+    nvs_close(h);
+
+    eth_cfg.use_static = (st != 0) && eth_static_config_valid(&eth_cfg);
+    eth_cfg.fell_back_last_boot = (fell != 0);
+
+    if (force) {
+        ESP_LOGW(TAG, "One-shot DHCP fallback requested; ignoring static IP this boot");
+        eth_cfg.using_fallback = true;
+        if (nvs_open(NVS_ETH_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u8(h, NVS_KEY_ETH_FORCE_DHCP, 0);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+
+    ESP_LOGI(TAG, "Ethernet config: mode=%s ip=%s mask=%s gw=%s dns=%s fallback=%s",
+             eth_cfg.use_static ? "static" : "dhcp",
+             eth_cfg.ip[0] ? eth_cfg.ip : "-",
+             eth_cfg.netmask[0] ? eth_cfg.netmask : "-",
+             eth_cfg.gateway[0] ? eth_cfg.gateway : "-",
+             eth_cfg.dns[0] ? eth_cfg.dns : "-",
+             eth_cfg.using_fallback ? "yes" : "no");
+}
+
+static esp_err_t save_eth_config(bool use_static, const char *ip, const char *mask,
+                                 const char *gw, const char *dns)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_ETH_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open eth NVS: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    nvs_set_u8(h, NVS_KEY_ETH_STATIC, use_static ? 1 : 0);
+    nvs_set_str(h, NVS_KEY_ETH_IP, ip ? ip : "");
+    nvs_set_str(h, NVS_KEY_ETH_MASK, mask ? mask : "");
+    nvs_set_str(h, NVS_KEY_ETH_GW, gw ? gw : "");
+    nvs_set_str(h, NVS_KEY_ETH_DNS, dns ? dns : "");
+    nvs_set_u8(h, NVS_KEY_ETH_FORCE_DHCP, 0);
+    nvs_set_u8(h, NVS_KEY_ETH_FELL_BACK, 0);
+    err = nvs_commit(h);
+    nvs_close(h);
+
+    if (err == ESP_OK) {
+        eth_cfg.use_static = use_static;
+        strncpy(eth_cfg.ip, ip ? ip : "", sizeof(eth_cfg.ip) - 1);
+        eth_cfg.ip[sizeof(eth_cfg.ip) - 1] = '\0';
+        strncpy(eth_cfg.netmask, mask ? mask : "", sizeof(eth_cfg.netmask) - 1);
+        eth_cfg.netmask[sizeof(eth_cfg.netmask) - 1] = '\0';
+        strncpy(eth_cfg.gateway, gw ? gw : "", sizeof(eth_cfg.gateway) - 1);
+        eth_cfg.gateway[sizeof(eth_cfg.gateway) - 1] = '\0';
+        strncpy(eth_cfg.dns, dns ? dns : "", sizeof(eth_cfg.dns) - 1);
+        eth_cfg.dns[sizeof(eth_cfg.dns) - 1] = '\0';
+        eth_cfg.using_fallback = false;
+        eth_cfg.fell_back_last_boot = false;
+        ESP_LOGI(TAG, "Ethernet config saved: %s", use_static ? "static" : "dhcp");
+    }
+    return err;
+}
+
+static void request_dhcp_fallback_and_reboot(const char *reason)
+{
+    ESP_LOGW(TAG, "DHCP fallback: %s", reason);
+    nvs_handle_t h;
+    if (nvs_open(NVS_ETH_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_ETH_FORCE_DHCP, 1);
+        nvs_set_u8(h, NVS_KEY_ETH_FELL_BACK, 1);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
+
+static esp_err_t apply_eth_static_ip(void)
+{
+    if (!eth_netif) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t stop_err = esp_netif_dhcpc_stop(eth_netif);
+    if (stop_err != ESP_OK && stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        ESP_LOGW(TAG, "dhcpc_stop: %s", esp_err_to_name(stop_err));
+    }
+
+    esp_netif_ip_info_t info;
+    memset(&info, 0, sizeof(info));
+    if (esp_netif_str_to_ip4(eth_cfg.ip, &info.ip) != ESP_OK) return ESP_ERR_INVALID_ARG;
+    if (esp_netif_str_to_ip4(eth_cfg.netmask, &info.netmask) != ESP_OK) return ESP_ERR_INVALID_ARG;
+    if (eth_cfg.gateway[0]) {
+        esp_netif_str_to_ip4(eth_cfg.gateway, &info.gw);
+    }
+
+    esp_err_t err = esp_netif_set_ip_info(eth_netif, &info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_ip_info failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    const char *dns_str = eth_cfg.dns[0] ? eth_cfg.dns : eth_cfg.gateway;
+    if (dns_str[0]) {
+        esp_netif_dns_info_t dns;
+        memset(&dns, 0, sizeof(dns));
+        dns.ip.type = ESP_IPADDR_TYPE_V4;
+        if (esp_netif_str_to_ip4(dns_str, &dns.ip.u_addr.ip4) == ESP_OK) {
+            esp_netif_set_dns_info(eth_netif, ESP_NETIF_DNS_MAIN, &dns);
+        }
+    }
+
+    ESP_LOGI(TAG, "Applied static Ethernet IP %s mask %s gw %s dns %s",
+             eth_cfg.ip, eth_cfg.netmask,
+             eth_cfg.gateway[0] ? eth_cfg.gateway : "0.0.0.0",
+             dns_str[0] ? dns_str : "0.0.0.0");
+    return ESP_OK;
+}
+
+typedef struct {
+    uint8_t type;
+    uint8_t code;
+    uint16_t checksum;
+    uint16_t id;
+    uint16_t seqno;
+} __attribute__((packed)) icmp_echo_hdr_t;
+
+static uint16_t icmp_checksum(const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t sum = 0;
+    while (len > 1) {
+        sum += ((uint16_t)p[0] << 8) | p[1];
+        p += 2;
+        len -= 2;
+    }
+    if (len) sum += (uint16_t)p[0] << 8;
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+/** 1 = echo reply, 0 = no reply, -1 = ICMP not available */
+static int icmp_ping_host(uint32_t dest_addr, int timeout_ms)
+{
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (sock < 0) {
+        ESP_LOGW(TAG, "ICMP socket unavailable (%d)", errno);
+        return -1;
+    }
+
+    struct timeval tv = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    icmp_echo_hdr_t echo = {0};
+    echo.type = 8;  // ICMP_ECHO
+    echo.id = htons(0xB10C);
+    echo.seqno = htons(1);
+    echo.checksum = 0;
+    echo.checksum = htons(icmp_checksum(&echo, sizeof(echo)));
+
+    struct sockaddr_in dest = {0};
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = dest_addr;
+
+    if (sendto(sock, &echo, sizeof(echo), 0, (struct sockaddr *)&dest, sizeof(dest)) < 0) {
+        close(sock);
+        return 0;
+    }
+
+    char buf[128];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromlen);
+    close(sock);
+    if (n <= 0) return 0;
+
+    int iphdr_len = 0;
+    if (n >= 20 && (buf[0] >> 4) == 4) {
+        iphdr_len = (buf[0] & 0x0F) * 4;
+    }
+    if (n < iphdr_len + (int)sizeof(icmp_echo_hdr_t)) return 0;
+    icmp_echo_hdr_t *rx = (icmp_echo_hdr_t *)(buf + iphdr_len);
+    return rx->type == 0 ? 1 : 0;  // ICMP_ECHOREPLY
+}
+
+static bool eth_lan_looks_alive(void)
+{
+    if (eth_lan_confirmed) return true;
+    if (last_successful_connection_time > 0 &&
+        last_successful_connection_time >= boot_time_us) {
+        return true;
+    }
+    return false;
+}
+
+static void eth_dhcp_fallback_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    if (!eth_cfg.use_static || eth_cfg.using_fallback) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_event_group, ETH_CONNECTED_BIT, pdFALSE, pdTRUE,
+                                           pdMS_TO_TICKS(ETH_DHCP_FALLBACK_SEC * 1000));
+    if ((bits & ETH_CONNECTED_BIT) == 0) {
+        ESP_LOGW(TAG, "Ethernet link never came up; not falling back to DHCP");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    esp_ip4_addr_t gw = {0};
+    bool have_gw = ipv4_parse_ok(eth_cfg.gateway, &gw) && gw.addr != 0;
+    if (!have_gw) {
+        ESP_LOGI(TAG, "No gateway configured; skipping DHCP fallback ping (BOOT still forces DHCP)");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int64_t deadline = esp_timer_get_time() + (int64_t)ETH_DHCP_FALLBACK_SEC * 1000000LL;
+    bool pinged_ok = false;
+
+    while (esp_timer_get_time() < deadline) {
+        if (eth_lan_looks_alive()) {
+            ESP_LOGI(TAG, "LAN traffic seen; keeping static IP");
+            vTaskDelete(NULL);
+            return;
+        }
+        bits = xEventGroupGetBits(s_event_group);
+        if ((bits & ETH_CONNECTED_BIT) == 0) {
+            ESP_LOGW(TAG, "Ethernet link dropped during fallback check");
+            vTaskDelete(NULL);
+            return;
+        }
+        if (have_gw) {
+            int ping = icmp_ping_host(gw.addr, 1000);
+            if (ping == 1) {
+                pinged_ok = true;
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(ETH_DHCP_FALLBACK_PING_INTERVAL_MS));
+    }
+
+    if (eth_lan_looks_alive() || pinged_ok) {
+        ESP_LOGI(TAG, "Gateway reachable; keeping static IP");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    request_dhcp_fallback_and_reboot("static IP gateway unreachable and no LAN traffic");
+    vTaskDelete(NULL);
+}
+
+static void eth_boot_button_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << ETH_BOOT_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+
+    int held_ticks = 0;
+    while (1) {
+        if (gpio_get_level(ETH_BOOT_GPIO) == 0) {
+            held_ticks++;
+            if (held_ticks == 1) {
+                ESP_LOGI(TAG, "BOOT held - keep holding 3s to force DHCP");
+            }
+            if (held_ticks >= 30) {
+                request_dhcp_fallback_and_reboot("BOOT button held 3s");
+            }
+        } else {
+            held_ticks = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 // ===== Powerwall Connectivity Check =====
 
 /** Check if Powerwall is reachable (non-blocking TCP connect test) */
@@ -301,6 +706,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     esp_ota_img_states_t ota_state;
     esp_ota_get_state_partition(running, &ota_state);
 
+    eth_lan_confirmed = true;
+
     // Get WiFi status
     EventBits_t bits = xEventGroupGetBits(s_event_group);
     bool wifi_connected = (bits & WIFI_CONNECTED_BIT) != 0;
@@ -325,6 +732,33 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     if (wifi_netif && esp_netif_get_ip_info(wifi_netif, &ip_info) == ESP_OK) {
         snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip_info.ip));
     }
+
+    esp_netif_ip_info_t eth_ip_info;
+    char eth_ip_str[16] = "N/A";
+    char eth_mask_str[16] = "";
+    char eth_gw_str[16] = "";
+    char eth_dns_str[16] = "";
+    if (eth_netif && esp_netif_get_ip_info(eth_netif, &eth_ip_info) == ESP_OK) {
+        snprintf(eth_ip_str, sizeof(eth_ip_str), IPSTR, IP2STR(&eth_ip_info.ip));
+        snprintf(eth_mask_str, sizeof(eth_mask_str), IPSTR, IP2STR(&eth_ip_info.netmask));
+        snprintf(eth_gw_str, sizeof(eth_gw_str), IPSTR, IP2STR(&eth_ip_info.gw));
+    }
+    if (eth_netif) {
+        esp_netif_dns_info_t dns_info;
+        if (esp_netif_get_dns_info(eth_netif, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK &&
+            dns_info.ip.type == ESP_IPADDR_TYPE_V4) {
+            snprintf(eth_dns_str, sizeof(eth_dns_str), IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+        }
+    }
+
+    const char *form_ip = eth_cfg.ip[0] ? eth_cfg.ip : eth_ip_str;
+    const char *form_mask = eth_cfg.netmask[0] ? eth_cfg.netmask : (eth_mask_str[0] ? eth_mask_str : "255.255.255.0");
+    const char *form_gw = eth_cfg.gateway[0] ? eth_cfg.gateway : eth_gw_str;
+    const char *form_dns = eth_cfg.dns[0] ? eth_cfg.dns : eth_dns_str;
+    if (strcmp(form_ip, "N/A") == 0) form_ip = "";
+
+    const char *eth_mode_label = eth_cfg.using_fallback ? "DHCP (fallback)" :
+                                 (eth_cfg.use_static ? "Static" : "DHCP");
 
     // Build response - split into chunks for memory efficiency
     httpd_resp_set_type(req, "text/html");
@@ -378,8 +812,18 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     // Target IP
     snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">" ICON_DNS " Target</div><div class=\"value\">%s</div></div>"
-        "</div></div>", POWERWALL_IP_STR);
+        "<div class=\"status-item\"><div class=\"label\">" ICON_DNS " Target</div><div class=\"value\">%s</div></div>",
+        POWERWALL_IP_STR);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Ethernet IP (clickable to show/hide Ethernet config)
+    snprintf(buf, sizeof(buf),
+        "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"document.getElementById('ethcfg').style.display=document.getElementById('ethcfg').style.display==='none'?'block':'none'\">"
+        "<div class=\"label\">" ICON_LAN " Ethernet " ICON_SETTINGS "</div>"
+        "<div class=\"value\" id=\"ethip\">%s</div>"
+        "<div class=\"text-xs text-muted\">%s</div></div>"
+        "</div></div>",
+        eth_ip_str, eth_mode_label);
     httpd_resp_sendstr_chunk(req, buf);
 
     // WiFi Configuration card (hidden by default, toggle via WiFi Status click)
@@ -408,6 +852,54 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "</form></div>", wifi_ssid);
     httpd_resp_sendstr_chunk(req, buf);
 
+    // Ethernet Configuration card (hidden by default, toggle via Ethernet status click)
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"card\" id=\"ethcfg\" style=\"display:none\"><h2>" ICON_LAN " Ethernet Configuration</h2>");
+    if (eth_cfg.using_fallback || eth_cfg.fell_back_last_boot) {
+        httpd_resp_sendstr_chunk(req,
+            "<div class=\"alert alert-warn\" style=\"margin-bottom:0.75rem\">" ICON_WARN
+            " Fell back to DHCP because the static gateway was unreachable. "
+            "Saved static settings are unchanged. Save again to retry, or switch to DHCP.</div>");
+    }
+    httpd_resp_sendstr_chunk(req,
+        "<form method=\"POST\" action=\"/eth/save\">"
+        "<div class=\"form-group\"><label class=\"label\">Address mode</label>"
+        "<select name=\"mode\" id=\"ethmode\" onchange=\"toggleEthMode()\" class=\"mt-1\">");
+    snprintf(buf, sizeof(buf),
+        "<option value=\"dhcp\"%s>DHCP</option>"
+        "<option value=\"static\"%s>Static IP</option></select></div>",
+        eth_cfg.use_static ? "" : " selected",
+        eth_cfg.use_static ? " selected" : "");
+    httpd_resp_sendstr_chunk(req, buf);
+
+    snprintf(buf, sizeof(buf),
+        "<div id=\"ethstatic\" style=\"display:%s\">"
+        "<div class=\"form-group\"><label class=\"label\">IP address</label>"
+        "<input type=\"text\" name=\"ip\" value=\"%s\" placeholder=\"192.168.1.50\" class=\"mt-1\"></div>",
+        eth_cfg.use_static ? "block" : "none", form_ip);
+    httpd_resp_sendstr_chunk(req, buf);
+    snprintf(buf, sizeof(buf),
+        "<div class=\"form-group\"><label class=\"label\">Subnet mask</label>"
+        "<input type=\"text\" name=\"netmask\" value=\"%s\" placeholder=\"255.255.255.0\" class=\"mt-1\"></div>",
+        form_mask);
+    httpd_resp_sendstr_chunk(req, buf);
+    snprintf(buf, sizeof(buf),
+        "<div class=\"form-group\"><label class=\"label\">Gateway</label>"
+        "<input type=\"text\" name=\"gateway\" value=\"%s\" placeholder=\"192.168.1.1\" class=\"mt-1\"></div>",
+        form_gw);
+    httpd_resp_sendstr_chunk(req, buf);
+    snprintf(buf, sizeof(buf),
+        "<div class=\"form-group\"><label class=\"label\">DNS</label>"
+        "<input type=\"text\" name=\"dns\" value=\"%s\" placeholder=\"192.168.1.1\" class=\"mt-1\"></div>"
+        "</div>", form_dns);
+    httpd_resp_sendstr_chunk(req, buf);
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">"
+        "Device reboots to apply. If the gateway is unreachable for 45s with no LAN traffic, "
+        "it falls back to DHCP. Hold BOOT 3 seconds to force DHCP.</div>"
+        "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save & Reboot</button>"
+        "</form></div>");
+
     // System info card
     httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_MEMORY " System</h2><div class=\"grid\">");
     snprintf(buf, sizeof(buf),
@@ -417,8 +909,9 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, buf);
     snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Ethernet IP</div><div class=\"value\" id=\"ethip2\">%s</div></div>"
         "</div>",
-        ip_str);
+        ip_str, eth_ip_str);
     httpd_resp_sendstr_chunk(req, buf);
     httpd_resp_sendstr_chunk(req,
         "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
@@ -899,9 +1392,80 @@ static esp_err_t wifi_save_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** Ethernet save handler - saves LAN settings and reboots */
+static esp_err_t eth_save_handler(httpd_req_t *req)
+{
+    char content[384];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    content[received] = '\0';
+    ESP_LOGI(TAG, "Ethernet save request: %s", content);
+
+    char mode[16] = {0};
+    char ip[16] = {0};
+    char mask[16] = {0};
+    char gw[16] = {0};
+    char dns[16] = {0};
+    form_get(content, "mode", mode, sizeof(mode));
+    form_get(content, "ip", ip, sizeof(ip));
+    form_get(content, "netmask", mask, sizeof(mask));
+    form_get(content, "gateway", gw, sizeof(gw));
+    form_get(content, "dns", dns, sizeof(dns));
+
+    bool use_static = (strcmp(mode, "static") == 0);
+    if (use_static) {
+        eth_lan_config_t tmp = {0};
+        tmp.use_static = true;
+        strncpy(tmp.ip, ip, sizeof(tmp.ip) - 1);
+        strncpy(tmp.netmask, mask, sizeof(tmp.netmask) - 1);
+        strncpy(tmp.gateway, gw, sizeof(tmp.gateway) - 1);
+        strncpy(tmp.dns, dns, sizeof(tmp.dns) - 1);
+        if (!eth_static_config_valid(&tmp)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                "Invalid static IP settings. Check IP and subnet mask.");
+            return ESP_FAIL;
+        }
+    }
+
+    esp_err_t err = save_eth_config(use_static, ip, mask, gw, dns);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    const char *new_addr = use_static ? ip : "DHCP address";
+    char response[1024];
+    snprintf(response, sizeof(response),
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+        "<meta http-equiv=\"refresh\" content=\"12;url=http://%s/\">"
+        "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}"
+        ".box{background:#1e293b;padding:2rem;border-radius:0.75rem;text-align:center;border:1px solid #334155;max-width:28rem}"
+        ".spinner{width:3rem;height:3rem;border:3px solid #334155;border-top:3px solid #3b82f6;border-radius:50%%;animation:spin 1s linear infinite;margin:1rem auto}"
+        "@keyframes spin{to{transform:rotate(360deg)}} a{color:#3b82f6}</style></head>"
+        "<body><div class=\"box\"><div class=\"spinner\"></div>"
+        "<h2>Applying Ethernet settings</h2>"
+        "<p>Rebooting. New address: <strong>%s</strong></p>"
+        "<p class=\"text-sm\">If the gateway is unreachable for 45s, the device falls back to DHCP. "
+        "Hold BOOT 3 seconds to force DHCP. mDNS: <a href=\"http://powerwall.local/\">powerwall.local</a></p>"
+        "</div></body></html>",
+        use_static ? ip : "powerwall.local", new_addr);
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, response, strlen(response));
+
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+    return ESP_OK;
+}
+
 /** API endpoint for status JSON */
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
+    eth_lan_confirmed = true;
+
     EventBits_t bits = xEventGroupGetBits(s_event_group);
     bool wifi_connected = (bits & WIFI_CONNECTED_BIT) != 0;
 
@@ -924,10 +1488,33 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     proxy_stats_t stats;
     proxy_get_stats(&stats);
 
-    char response[512];
+    char eth_ip_str[16] = "0.0.0.0";
+    char eth_mask_str[16] = "0.0.0.0";
+    char eth_gw_str[16] = "0.0.0.0";
+    char eth_dns_str[16] = "0.0.0.0";
+    if (eth_netif) {
+        esp_netif_ip_info_t eth_ip_info;
+        if (esp_netif_get_ip_info(eth_netif, &eth_ip_info) == ESP_OK) {
+            snprintf(eth_ip_str, sizeof(eth_ip_str), IPSTR, IP2STR(&eth_ip_info.ip));
+            snprintf(eth_mask_str, sizeof(eth_mask_str), IPSTR, IP2STR(&eth_ip_info.netmask));
+            snprintf(eth_gw_str, sizeof(eth_gw_str), IPSTR, IP2STR(&eth_ip_info.gw));
+        }
+        esp_netif_dns_info_t dns_info;
+        if (esp_netif_get_dns_info(eth_netif, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK &&
+            dns_info.ip.type == ESP_IPADDR_TYPE_V4) {
+            snprintf(eth_dns_str, sizeof(eth_dns_str), IPSTR, IP2STR(&dns_info.ip.u_addr.ip4));
+        }
+    }
+
+    const char *eth_mode = eth_cfg.using_fallback ? "fallback" :
+                           (eth_cfg.use_static ? "static" : "dhcp");
+
+    char response[768];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
+        "\"eth\":{\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
+        "\"mode\":\"%s\",\"fallback\":%s},"
         "\"cpu\":%u,\"heap\":%lu,"
         "\"uptime\":%lld,"
         "\"total_bytes_in\":%llu,\"total_bytes_out\":%llu,"
@@ -936,6 +1523,9 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         wifi_ssid, rssi,
         powerwall_reachable ? "true" : "false",
         POWERWALL_IP_STR,
+        eth_ip_str, eth_mask_str, eth_gw_str, eth_dns_str,
+        eth_mode,
+        (eth_cfg.using_fallback || eth_cfg.fell_back_last_boot) ? "true" : "false",
         cpu_usage_percent,
         (unsigned long)esp_get_free_heap_size(),
         (long long)uptime_sec,
@@ -1234,6 +1824,13 @@ static esp_err_t start_http_server(void)
     };
     httpd_register_uri_handler(web_server, &wifi_save);
 
+    httpd_uri_t eth_save = {
+        .uri = "/eth/save",
+        .method = HTTP_POST,
+        .handler = eth_save_handler,
+    };
+    httpd_register_uri_handler(web_server, &eth_save);
+
     // API endpoints
     httpd_uri_t api_status = {
         .uri = "/api/status",
@@ -1404,6 +2001,16 @@ static esp_err_t init_ethernet(void)
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     eth_netif = esp_netif_new(&cfg);
 
+    load_eth_config();
+
+    // Stop DHCP before the interface comes up if we will use a static address
+    if (eth_cfg.use_static && !eth_cfg.using_fallback) {
+        esp_err_t stop_err = esp_netif_dhcpc_stop(eth_netif);
+        if (stop_err != ESP_OK && stop_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+            ESP_LOGW(TAG, "Early dhcpc_stop: %s", esp_err_to_name(stop_err));
+        }
+    }
+
     // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
@@ -1463,6 +2070,14 @@ static esp_err_t init_ethernet(void)
 
     // Attach Ethernet driver to TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
+
+    // Apply static IP after attach so GOT_IP is posted when the driver starts
+    if (eth_cfg.use_static && !eth_cfg.using_fallback) {
+        if (apply_eth_static_ip() != ESP_OK) {
+            ESP_LOGE(TAG, "Static IP apply failed; starting DHCP");
+            esp_netif_dhcpc_start(eth_netif);
+        }
+    }
 
     // Start Ethernet driver
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
@@ -1780,7 +2395,18 @@ void app_main(void)
 
     // Wait for Ethernet to get IP before starting OTA server
     ESP_LOGI(TAG, "Waiting for Ethernet IP...");
-    xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, false, true, portMAX_DELAY);
+    EventBits_t ip_bits = xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, pdFALSE, pdTRUE,
+                                              pdMS_TO_TICKS(15000));
+    if ((ip_bits & ETH_GOT_IP_BIT) == 0) {
+        esp_netif_ip_info_t assigned;
+        if (eth_netif && esp_netif_get_ip_info(eth_netif, &assigned) == ESP_OK && assigned.ip.addr != 0) {
+            ESP_LOGW(TAG, "GOT_IP event missed; using " IPSTR, IP2STR(&assigned.ip));
+            xEventGroupSetBits(s_event_group, ETH_GOT_IP_BIT);
+        } else {
+            ESP_LOGI(TAG, "Still waiting for DHCP lease...");
+            xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+        }
+    }
 
     // Initialize modules that depend on Ethernet
     remote_ota_init(eth_netif);
@@ -1797,6 +2423,10 @@ void app_main(void)
 
     // Validate OTA image early so device doesn't rollback while user configures WiFi
     validate_ota_image();
+
+    // Static-IP DHCP fallback + BOOT-button recovery
+    xTaskCreate(eth_dhcp_fallback_task, "eth_fallback", 3072, NULL, 3, NULL);
+    xTaskCreate(eth_boot_button_task, "eth_boot_btn", 2048, NULL, 3, NULL);
 
     // Start system monitoring task
     xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);

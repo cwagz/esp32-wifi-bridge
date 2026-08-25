@@ -132,6 +132,8 @@ static const char *DARK_CSS =
     "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';" \
     "sigEl.innerHTML='<span style=\"color:'+sc+'\">'+r+' dBm ('+sigQ(r)+')</span>';}else{sigEl.textContent='-';}" \
     "document.getElementById('cpu').textContent=st.cpu+'%';" \
+    "if(st.eth){var e1=document.getElementById('ethip');if(e1)e1.textContent=st.eth.ip||'N/A';" \
+    "var e2=document.getElementById('ethip2');if(e2)e2.textContent=st.eth.ip||'N/A';}" \
     "document.getElementById('uptime').textContent=fmtUptime(st.uptime);" \
     "document.getElementById('reqcnt').textContent=st.total_requests;" \
     "var sr=st.total_requests>0?Math.round(st.successful_requests*100/st.total_requests):0;" \
@@ -211,6 +213,8 @@ static const char *DARK_CSS =
     "(d.time_synced?'<span style=\"color:#22c55e\">NTP synced</span>':'<span style=\"color:#eab308\">NTP pending</span>');}" \
     "}).catch(function(e){console.log('Chart error:',e);});}" \
     "drawWifiChart();setInterval(drawWifiChart,60000);" \
+    "function toggleEthMode(){var s=document.getElementById('ethmode');var b=document.getElementById('ethstatic');" \
+    "if(s&&b)b.style.display=s.value==='static'?'block':'none';}" \
     "</script>"
 
 #endif // WEB_UI_H

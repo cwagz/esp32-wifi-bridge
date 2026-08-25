@@ -21,6 +21,15 @@
 #define W5500_SCK_GPIO  13
 #define W5500_CS_GPIO   14
 
+// ===== Ethernet IP Configuration =====
+// If a static IP is saved but the LAN looks unreachable (no HTTP/proxy traffic
+// and the gateway does not answer ICMP) for this many seconds after link-up,
+// reboot into DHCP. Saved static settings are kept; the dashboard shows a warning.
+#define ETH_DHCP_FALLBACK_SEC 45
+#define ETH_DHCP_FALLBACK_PING_INTERVAL_MS 3000
+// Hold BOOT (GPIO0) for 3 seconds after the firmware is running to force DHCP.
+#define ETH_BOOT_GPIO 0
+
 // ===== Proxy Server Configuration =====
 #define PROXY_PORT 443
 #define PROXY_TIMEOUT_MS 60000  // 60 seconds (increased from 30)
