@@ -1,18 +1,18 @@
 /*
- * Local compile-time overrides. Gitignored. This is a C header because the
- * firmware bakes these values in at compile time (there is no runtime .env).
+ * Optional local compile-time overrides. Gitignored.
+ *
+ * GitHub forks do not need this file for OTA: tagged CI and local builds
+ * derive https://<you>.github.io/<repo>/version.json from the git remote.
+ *
+ * Copy this to config.local.h only if you host firmware somewhere else
+ * or want compile-time defaults that differ from config.h.
  *
  *   cp include/config.local.h.example include/config.local.h
- *
- * Only define what you want to change. Anything omitted uses config.h.
- * Tagged GitHub Actions builds set REMOTE_OTA_VERSION_URL from the repo
- * owner, so this file is for local USB / PlatformIO builds.
  */
 
 #pragma once
 
-/* Point remote OTA at YOUR GitHub Pages site (not upstream). */
-#define REMOTE_OTA_VERSION_URL "https://YOUR_GITHUB_USER.github.io/esp32-wifi-bridge/version.json"
+/* #define REMOTE_OTA_VERSION_URL "https://example.com/version.json" */
 
 /* Optional compile-time WiFi defaults (the dashboard still wins at runtime). */
 /* #define WIFI_SSID "TeslaPowerwall" */

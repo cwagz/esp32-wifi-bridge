@@ -104,4 +104,4 @@ The codebase is split into three modules with clear responsibilities:
 - GitHub Actions builds on push to main and on tags
 - Tagged releases (`v*`) deploy to GitHub Pages and create releases
 - ESP Web Tools flasher: GitHub Pages at `https://<owner>.github.io/esp32-wifi-bridge/`
-- Remote OTA URL is injected at tagged CI builds (`REMOTE_OTA_VERSION_URL`). Local USB builds override with gitignored `include/config.local.h`.
+- Remote OTA URL: tagged CI and git-origin derivation (`https://<owner>.github.io/<repo>/version.json`). `include/config.local.h` is optional.

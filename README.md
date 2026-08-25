@@ -10,7 +10,7 @@ Tagged releases publish an installer to GitHub Pages:
 
 Connect your ESP32-S3-POE-ETH board via USB and click "Install". Works with Chrome, Edge, and Opera.
 
-Remote OTA uses that same Pages URL. Forks do **not** need to edit `config.h`: tagged CI builds inject the URL, and local builds override it with `include/config.local.h` (see [Local configuration](#local-configuration)).
+Remote OTA uses that same Pages URL. Forks do **not** need `config.local.h` or edits to `config.h`: tagged CI and local builds take the URL from the GitHub remote (`https://<owner>.github.io/<repo>/version.json`). Enable **Settings → Pages → Deploy from a branch → gh-pages**.
 
 ---
 
@@ -162,20 +162,11 @@ Ethernet static vs DHCP is stored in NVS (not compiled in). Configure it from th
 
 ### Local configuration
 
-The ESP32 compiles settings into the firmware. Per-machine values live in a **C header**, not a `.env` file:
+You do **not** need a per-fork config file if this repo is on GitHub and Pages is **Deploy from a branch / gh-pages**. The OTA URL is injected at build time.
 
-```bash
-cp include/config.local.h.example include/config.local.h
-# set REMOTE_OTA_VERSION_URL to https://<you>.github.io/esp32-wifi-bridge/version.json
-```
+`include/config.local.h` is optional (gitignored). Use it only to host OTA off GitHub Pages or to change compile-time defaults. Template: `include/config.local.h.example`.
 
-| File | In git? | Role |
-|------|---------|------|
-| `include/config.h` | yes | Shared defaults |
-| `include/config.local.h.example` | yes | Template |
-| `include/config.local.h` | no | Your overrides |
-
-Tagged CI sets `REMOTE_OTA_VERSION_URL` from the GitHub username, so Actions builds do not need `config.local.h`. Prefer setting the Tesla Wi‑Fi password in the dashboard (NVS), not in this header.
+Tesla Wi‑Fi password belongs in the dashboard (NVS), not in a header.
 
 ## Building & Deployment
 
