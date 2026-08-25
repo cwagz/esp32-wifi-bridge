@@ -817,9 +817,10 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, buf);
 
     // Ethernet IP (clickable to show/hide Ethernet config)
-    snprintf(buf, sizeof(buf),
+    httpd_resp_sendstr_chunk(req,
         "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"document.getElementById('ethcfg').style.display=document.getElementById('ethcfg').style.display==='none'?'block':'none'\">"
-        "<div class=\"label\">" ICON_LAN " Ethernet " ICON_SETTINGS "</div>"
+        "<div class=\"label\">" ICON_LAN " Ethernet " ICON_SETTINGS "</div>");
+    snprintf(buf, sizeof(buf),
         "<div class=\"value\" id=\"ethip\">%s</div>"
         "<div class=\"text-xs text-muted\">%s</div></div>"
         "</div></div>",
