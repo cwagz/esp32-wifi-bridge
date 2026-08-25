@@ -2,11 +2,15 @@
 
 ## Quick Install
 
-**Flash directly from your browser (no tools required):**
+**Flash directly from your browser (no tools required).**
 
-👉 **https://cwagz.github.io/esp32-wifi-bridge/**
+Tagged releases publish an installer to GitHub Pages:
+
+`https://<your-github-username>.github.io/esp32-wifi-bridge/`
 
 Connect your ESP32-S3-POE-ETH board via USB and click "Install". Works with Chrome, Edge, and Opera.
+
+Remote OTA uses that same Pages URL. Forks do **not** need to edit `config.h`: tagged CI builds inject the URL, and local builds can override it (see [Local configuration](#local-configuration) below).
 
 ---
 
@@ -155,6 +159,36 @@ Edit `include/config.h` to customize:
 ```
 
 Ethernet static vs DHCP is stored in NVS (not compiled in). Configure it from the dashboard.
+
+### Local configuration
+
+Personal settings stay out of git so the rest of the firmware can be contributed upstream.
+
+| File | Tracked? | Purpose |
+|------|----------|---------|
+| `include/config.h` | yes | Shared defaults |
+| `include/config.local.h.example` | yes | Template |
+| `include/config.local.h` | **no** | Your overrides (copy from the example) |
+| `.env.example` | yes | Template |
+| `.env` | **no** | Same overrides for CMake / CI-style env vars |
+
+Precedence: **CI / shell env** → **`.env`** → **`config.local.h`** → **`config.h` defaults**.
+
+Typical fork setup:
+
+```bash
+cp include/config.local.h.example include/config.local.h
+# set REMOTE_OTA_VERSION_URL to https://<you>.github.io/esp32-wifi-bridge/version.json
+```
+
+Or:
+
+```bash
+cp .env.example .env
+# edit REMOTE_OTA_VERSION_URL
+```
+
+Do not put the Tesla Wi‑Fi password in either file if you can avoid it — set it from the dashboard so it lives only in NVS.
 
 ## Building & Deployment
 

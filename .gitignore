@@ -5,3 +5,7 @@ sdkconfig
 sdkconfig.old
 build/
 .vscode
+
+# Per-fork / per-machine overrides (see *.example)
+.env
+include/config.local.h

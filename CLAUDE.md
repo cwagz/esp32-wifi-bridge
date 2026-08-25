@@ -103,5 +103,5 @@ The codebase is split into three modules with clear responsibilities:
 
 - GitHub Actions builds on push to main and on tags
 - Tagged releases (`v*`) deploy to GitHub Pages and create releases
-- ESP Web Tools flasher: https://cwagz.github.io/esp32-wifi-bridge/
-- Remote OTA checks `https://cwagz.github.io/esp32-wifi-bridge/version.json`
+- ESP Web Tools flasher: GitHub Pages at `https://<owner>.github.io/esp32-wifi-bridge/`
+- Remote OTA URL is injected at build time (`REMOTE_OTA_VERSION_URL`). Override locally with `include/config.local.h` or `.env` (both gitignored).

@@ -42,13 +42,18 @@ jobs:
           else
             VERSION=$(git describe --always --dirty --tags)
           fi
+          OWNER="${{ github.repository_owner }}"
+          REPO="${GITHUB_REPOSITORY#*/}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "ota_url=https://${OWNER}.github.io/${REPO}/version.json" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
+          echo "OTA URL: https://${OWNER}.github.io/${REPO}/version.json"
 
       - name: Build Firmware
         run: pio run
         env:
           FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+          REMOTE_OTA_VERSION_URL: ${{ steps.version.outputs.ota_url }}
 
       - name: Prepare Artifacts
         run: |
@@ -112,6 +117,7 @@ jobs:
           cp release/*.bin docs/
           touch docs/.nojekyll
           SIZE=$(stat --printf="%s" release/firmware.bin)
+          sed -i "s|https://github.com/mccahan/esp32-wifi-bridge|https://github.com/${OWNER}/${REPO}|g" docs/index.html
 
           cat > docs/manifest.json << EOF
           {
