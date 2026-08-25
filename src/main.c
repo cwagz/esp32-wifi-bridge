@@ -34,6 +34,7 @@
 #include "esp_http_server.h"
 #include "esp_app_format.h"
 #include "esp_timer.h"
+#include "driver/temperature_sensor.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
@@ -111,6 +112,11 @@ static EventGroupHandle_t s_event_group;
 
 // CPU usage tracking (percentage, 0-100)
 static volatile uint8_t cpu_usage_percent = 0;
+
+// On-die temperature (°C). chip_temp_ok is false until the first good sample.
+static temperature_sensor_handle_t temp_handle = NULL;
+static volatile float chip_temp_c = 0;
+static volatile bool chip_temp_ok = false;
 
 // ===== Log Capture Ring Buffer =====
 #define LOG_BUFFER_SIZE 50
@@ -336,6 +342,50 @@ static void hash_admin_password(const char *password, const uint8_t salt[ADMIN_S
     memcpy(buf + ADMIN_SALT_LEN, password, plen);
     mbedtls_sha256(buf, ADMIN_SALT_LEN + plen, out, 0);
     memset(buf, 0, sizeof(buf));
+}
+
+static void init_temp_sensor(void)
+{
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    if (temperature_sensor_install(&cfg, &temp_handle) != ESP_OK) {
+        ESP_LOGW(TAG, "Chip temperature sensor not available");
+        temp_handle = NULL;
+        return;
+    }
+    if (temperature_sensor_enable(temp_handle) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to enable temperature sensor");
+        temperature_sensor_uninstall(temp_handle);
+        temp_handle = NULL;
+        return;
+    }
+    ESP_LOGI(TAG, "Chip temperature sensor enabled");
+}
+
+static void sample_chip_temp(void)
+{
+    if (!temp_handle) {
+        chip_temp_ok = false;
+        return;
+    }
+    float t = 0;
+    if (temperature_sensor_get_celsius(temp_handle, &t) == ESP_OK) {
+        chip_temp_c = t;
+        chip_temp_ok = true;
+    }
+}
+
+static const char *chip_temp_color(void)
+{
+    if (!chip_temp_ok) {
+        return "#94a3b8";
+    }
+    if (chip_temp_c >= 80.0f) {
+        return "#ef4444";
+    }
+    if (chip_temp_c >= 65.0f) {
+        return "#eab308";
+    }
+    return "#22c55e";
 }
 
 static void load_admin_config(void)
@@ -1030,17 +1080,27 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "</form></div>");
 
     // System info card
+    sample_chip_temp();
+    char temp_disp[16] = "—";
+    if (chip_temp_ok) {
+        snprintf(temp_disp, sizeof(temp_disp), "%.1f °C", (double)chip_temp_c);
+    }
     httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_MEMORY " System</h2><div class=\"grid\">");
     snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">CPU</div><div class=\"value\" id=\"cpu\">%u%%</div></div>"
-        "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div>",
-        cpu_usage_percent, (unsigned long)(esp_get_free_heap_size() / 1024));
+        "<div class=\"status-item\"><div class=\"label\">Chip temp</div>"
+        "<div class=\"value\" id=\"temp\" style=\"color:%s\">%s</div></div>",
+        cpu_usage_percent, chip_temp_color(), temp_disp);
     httpd_resp_sendstr_chunk(req, buf);
     snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>",
+        (unsigned long)(esp_get_free_heap_size() / 1024), ip_str);
+    httpd_resp_sendstr_chunk(req, buf);
+    snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">Ethernet IP</div><div class=\"value\" id=\"ethip2\">%s</div></div>"
         "</div>",
-        ip_str, eth_ip_str);
+        eth_ip_str);
     httpd_resp_sendstr_chunk(req, buf);
     httpd_resp_sendstr_chunk(req,
         "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
@@ -1685,13 +1745,21 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     const char *eth_mode = eth_cfg.using_fallback ? "fallback" :
                            (eth_cfg.use_static ? "static" : "dhcp");
 
-    char response[768];
+    sample_chip_temp();
+    char temp_json[16];
+    if (chip_temp_ok) {
+        snprintf(temp_json, sizeof(temp_json), "%.1f", (double)chip_temp_c);
+    } else {
+        snprintf(temp_json, sizeof(temp_json), "null");
+    }
+
+    char response[800];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
         "\"eth\":{\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
         "\"mode\":\"%s\",\"fallback\":%s},"
-        "\"cpu\":%u,\"heap\":%lu,"
+        "\"cpu\":%u,\"temp_c\":%s,\"heap\":%lu,"
         "\"uptime\":%lld,"
         "\"total_bytes_in\":%llu,\"total_bytes_out\":%llu,"
         "\"total_requests\":%lu,\"successful_requests\":%lu,\"failed_requests\":%lu}",
@@ -1703,6 +1771,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         eth_mode,
         (eth_cfg.using_fallback || eth_cfg.fell_back_last_boot) ? "true" : "false",
         cpu_usage_percent,
+        temp_json,
         (unsigned long)esp_get_free_heap_size(),
         (long long)uptime_sec,
         (unsigned long long)stats.total_bytes_in, (unsigned long long)stats.total_bytes_out,
@@ -2636,15 +2705,22 @@ static void system_monitor_task(void *pvParameters)
         prev_time_us = current_time_us;
         #endif
 
-        // Get free heap size
+        sample_chip_temp();
         uint32_t free_heap = esp_get_free_heap_size();
         uint32_t min_free_heap = esp_get_minimum_free_heap_size();
 
         // Log system status
         #if configGENERATE_RUN_TIME_STATS
-        ESP_LOGI(TAG, "System Status - CPU: %u%%, Heap: %lu KB free, Min: %lu KB",
-                 cpu_usage_percent, (unsigned long)(free_heap / 1024),
-                 (unsigned long)(min_free_heap / 1024));
+        if (chip_temp_ok) {
+            ESP_LOGI(TAG, "System Status - CPU: %u%%, Temp: %.1f C, Heap: %lu KB free, Min: %lu KB",
+                     cpu_usage_percent, (double)chip_temp_c,
+                     (unsigned long)(free_heap / 1024),
+                     (unsigned long)(min_free_heap / 1024));
+        } else {
+            ESP_LOGI(TAG, "System Status - CPU: %u%%, Heap: %lu KB free, Min: %lu KB",
+                     cpu_usage_percent, (unsigned long)(free_heap / 1024),
+                     (unsigned long)(min_free_heap / 1024));
+        }
         #else
         ESP_LOGI(TAG, "System Status - Heap: %lu KB free, Min: %lu KB",
                  (unsigned long)(free_heap / 1024),
@@ -2767,6 +2843,8 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     load_admin_config();
+    init_temp_sensor();
+    sample_chip_temp();
 
     // Initialize Ethernet first (OTA server runs on Ethernet)
     ESP_ERROR_CHECK(init_ethernet());

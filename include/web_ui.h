@@ -137,6 +137,10 @@ static const char *DARK_CSS =
     "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';" \
     "sigEl.innerHTML='<span style=\"color:'+sc+'\">'+r+' dBm ('+sigQ(r)+')</span>';}else{sigEl.textContent='-';}" \
     "document.getElementById('cpu').textContent=st.cpu+'%';" \
+    "var tEl=document.getElementById('temp');" \
+    "if(tEl){if(st.temp_c==null||typeof st.temp_c!=='number'){tEl.textContent='—';tEl.style.color='#94a3b8';}" \
+    "else{tEl.textContent=st.temp_c.toFixed(1)+' °C';" \
+    "tEl.style.color=st.temp_c>=80?'#ef4444':st.temp_c>=65?'#eab308':'#22c55e';}}" \
     "if(st.eth){var e1=document.getElementById('ethip');if(e1)e1.textContent=st.eth.ip||'N/A';" \
     "var e2=document.getElementById('ethip2');if(e2)e2.textContent=st.eth.ip||'N/A';}" \
     "document.getElementById('uptime').textContent=fmtUptime(st.uptime);" \
