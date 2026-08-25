@@ -2,12 +2,11 @@
 #define CONFIG_H
 
 /*
- * Optional local overrides (not tracked in git):
- *   1. Copy include/config.local.h.example → include/config.local.h
- *   2. And/or set REMOTE_OTA_VERSION_URL in a project-root .env
+ * Optional local overrides — not tracked in git:
+ *   cp include/config.local.h.example include/config.local.h
  *
  * Precedence (highest wins):
- *   compile flag / CI env  >  .env  >  config.local.h  >  defaults below
+ *   CI compile flag (REMOTE_OTA_VERSION_URL)  >  config.local.h  >  defaults below
  */
 
 #if defined(__has_include)
@@ -165,9 +164,9 @@
 // Total buckets: (24 * 60) / 5 = 288 buckets
 
 // ===== Remote OTA Configuration =====
-// Default is the upstream project Pages site. Forks: set this in config.local.h
-// or REMOTE_OTA_VERSION_URL in .env. Tagged GitHub Actions builds inject it
-// automatically from the publishing repo (https://<owner>.github.io/<repo>/version.json).
+// Default is the upstream project Pages site. Forks: override in config.local.h.
+// Tagged GitHub Actions builds inject this from the publishing repo
+// (https://<owner>.github.io/<repo>/version.json) so CI does not need that file.
 #ifndef REMOTE_OTA_VERSION_URL
 #define REMOTE_OTA_VERSION_URL "https://mccahan.github.io/esp32-wifi-bridge/version.json"
 #endif

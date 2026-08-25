@@ -1,11 +1,12 @@
 /*
- * Local compile-time overrides. Copy to config.local.h (gitignored).
+ * Local compile-time overrides. Gitignored. This is a C header because the
+ * firmware bakes these values in at compile time (there is no runtime .env).
  *
- * Only the lines you uncomment/change are needed. Anything omitted
- * falls through to the defaults in config.h.
+ *   cp include/config.local.h.example include/config.local.h
  *
- * Tagged GitHub Actions builds set REMOTE_OTA_VERSION_URL from the
- * repo owner, so this file is mainly for local USB/pio builds.
+ * Only define what you want to change. Anything omitted uses config.h.
+ * Tagged GitHub Actions builds set REMOTE_OTA_VERSION_URL from the repo
+ * owner, so this file is for local USB / PlatformIO builds.
  */
 
 #pragma once
@@ -13,7 +14,7 @@
 /* Point remote OTA at YOUR GitHub Pages site (not upstream). */
 #define REMOTE_OTA_VERSION_URL "https://YOUR_GITHUB_USER.github.io/esp32-wifi-bridge/version.json"
 
-/* Optional: compile-time WiFi defaults (runtime dashboard still wins). */
+/* Optional compile-time WiFi defaults (the dashboard still wins at runtime). */
 /* #define WIFI_SSID "TeslaPowerwall" */
 /* #define WIFI_PASSWORD "" */
 

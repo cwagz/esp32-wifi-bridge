@@ -6,6 +6,5 @@ sdkconfig.old
 build/
 .vscode
 
-# Per-fork / per-machine overrides (see *.example)
-.env
+# Per-machine compile overrides (copy from include/config.local.h.example)
 include/config.local.h

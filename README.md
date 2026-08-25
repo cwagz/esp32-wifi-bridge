@@ -10,7 +10,7 @@ Tagged releases publish an installer to GitHub Pages:
 
 Connect your ESP32-S3-POE-ETH board via USB and click "Install". Works with Chrome, Edge, and Opera.
 
-Remote OTA uses that same Pages URL. Forks do **not** need to edit `config.h`: tagged CI builds inject the URL, and local builds can override it (see [Local configuration](#local-configuration) below).
+Remote OTA uses that same Pages URL. Forks do **not** need to edit `config.h`: tagged CI builds inject the URL, and local builds override it with `include/config.local.h` (see [Local configuration](#local-configuration)).
 
 ---
 
@@ -162,33 +162,20 @@ Ethernet static vs DHCP is stored in NVS (not compiled in). Configure it from th
 
 ### Local configuration
 
-Personal settings stay out of git so the rest of the firmware can be contributed upstream.
-
-| File | Tracked? | Purpose |
-|------|----------|---------|
-| `include/config.h` | yes | Shared defaults |
-| `include/config.local.h.example` | yes | Template |
-| `include/config.local.h` | **no** | Your overrides (copy from the example) |
-| `.env.example` | yes | Template |
-| `.env` | **no** | Same overrides for CMake / CI-style env vars |
-
-Precedence: **CI / shell env** → **`.env`** → **`config.local.h`** → **`config.h` defaults**.
-
-Typical fork setup:
+The ESP32 compiles settings into the firmware. Per-machine values live in a **C header**, not a `.env` file:
 
 ```bash
 cp include/config.local.h.example include/config.local.h
 # set REMOTE_OTA_VERSION_URL to https://<you>.github.io/esp32-wifi-bridge/version.json
 ```
 
-Or:
+| File | In git? | Role |
+|------|---------|------|
+| `include/config.h` | yes | Shared defaults |
+| `include/config.local.h.example` | yes | Template |
+| `include/config.local.h` | no | Your overrides |
 
-```bash
-cp .env.example .env
-# edit REMOTE_OTA_VERSION_URL
-```
-
-Do not put the Tesla Wi‑Fi password in either file if you can avoid it — set it from the dashboard so it lives only in NVS.
+Tagged CI sets `REMOTE_OTA_VERSION_URL` from the GitHub username, so Actions builds do not need `config.local.h`. Prefer setting the Tesla Wi‑Fi password in the dashboard (NVS), not in this header.
 
 ## Building & Deployment
 
