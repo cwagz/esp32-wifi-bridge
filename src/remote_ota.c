@@ -271,7 +271,6 @@ static void perform_remote_ota_task(void *pvParameters)
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
         .buffer_size = 2048,
-        .skip_cert_common_name_check = true,
         .user_agent = "Mozilla/5.0 ESP32",
     };
 

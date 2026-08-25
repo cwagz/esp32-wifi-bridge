@@ -1098,10 +1098,36 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         (unsigned long)(esp_get_free_heap_size() / 1024), ip_str);
     httpd_resp_sendstr_chunk(req, buf);
     snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">Ethernet IP</div><div class=\"value\" id=\"ethip2\">%s</div></div>"
-        "</div>",
+        "<div class=\"status-item\"><div class=\"label\">Ethernet IP</div><div class=\"value\" id=\"ethip2\">%s</div></div>",
         eth_ip_str);
     httpd_resp_sendstr_chunk(req, buf);
+    {
+        char wd_disp[24];
+        const char *wd_color;
+        if (last_successful_connection_time == 0) {
+            snprintf(wd_disp, sizeof(wd_disp), "Idle");
+            wd_color = "#94a3b8";
+        } else {
+            int64_t wd_s = (esp_timer_get_time() - last_successful_connection_time) / 1000000;
+            if (wd_s >= 60) {
+                snprintf(wd_disp, sizeof(wd_disp), "Armed · %lldm", (long long)(wd_s / 60));
+            } else {
+                snprintf(wd_disp, sizeof(wd_disp), "Armed · %llds", (long long)wd_s);
+            }
+            if (wd_s >= (WATCHDOG_TIMEOUT_SEC * 9) / 10) {
+                wd_color = "#ef4444";
+            } else if (wd_s >= (WATCHDOG_TIMEOUT_SEC * 3) / 4) {
+                wd_color = "#eab308";
+            } else {
+                wd_color = "#22c55e";
+            }
+        }
+        snprintf(buf, sizeof(buf),
+            "<div class=\"status-item\"><div class=\"label\">Watchdog</div>"
+            "<div class=\"value\" id=\"wdog\" style=\"color:%s\">%s</div></div></div>",
+            wd_color, wd_disp);
+        httpd_resp_sendstr_chunk(req, buf);
+    }
     httpd_resp_sendstr_chunk(req,
         "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
@@ -1753,13 +1779,23 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         snprintf(temp_json, sizeof(temp_json), "null");
     }
 
-    char response[800];
+    bool wd_armed = last_successful_connection_time != 0;
+    char wd_last[16];
+    if (wd_armed) {
+        snprintf(wd_last, sizeof(wd_last), "%lld",
+                 (long long)((esp_timer_get_time() - last_successful_connection_time) / 1000000));
+    } else {
+        snprintf(wd_last, sizeof(wd_last), "null");
+    }
+
+    char response[896];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
         "\"eth\":{\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
         "\"mode\":\"%s\",\"fallback\":%s},"
         "\"cpu\":%u,\"temp_c\":%s,\"heap\":%lu,"
+        "\"watchdog\":{\"armed\":%s,\"last_s\":%s,\"timeout_s\":%d},"
         "\"uptime\":%lld,"
         "\"total_bytes_in\":%llu,\"total_bytes_out\":%llu,"
         "\"total_requests\":%lu,\"successful_requests\":%lu,\"failed_requests\":%lu}",
@@ -1773,6 +1809,9 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         cpu_usage_percent,
         temp_json,
         (unsigned long)esp_get_free_heap_size(),
+        wd_armed ? "true" : "false",
+        wd_last,
+        WATCHDOG_TIMEOUT_SEC,
         (long long)uptime_sec,
         (unsigned long long)stats.total_bytes_in, (unsigned long long)stats.total_bytes_out,
         (unsigned long)stats.total_requests, (unsigned long)stats.successful_requests, (unsigned long)stats.failed_requests);

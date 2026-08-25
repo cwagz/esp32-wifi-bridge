@@ -39,12 +39,11 @@ CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 
-# ESP-TLS Configuration
-# Note: INSECURE and SKIP_SERVER_CERT_VERIFY are needed for Powerwall proxy (self-signed cert)
-# Remote OTA uses explicit certificate bundle attachment for GitHub HTTPS
+# ESP-TLS: OTA uses the certificate bundle. Powerwall traffic is TLS
+# passthrough and does not use esp-tls, so skip-verify is not needed.
 CONFIG_ESP_TLS_PSK_VERIFICATION=n
-CONFIG_ESP_TLS_INSECURE=y
-CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+# CONFIG_ESP_TLS_INSECURE is not set
+# CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY is not set
 
 # Certificate bundle for HTTPS (GitHub Pages OTA)
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
