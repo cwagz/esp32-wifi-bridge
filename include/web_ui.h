@@ -110,12 +110,15 @@ static const char *DARK_CSS =
 
 #define WEB_UI_SCRIPT \
     "<script>" \
+    "function fillSel(s,t){s.textContent='';var o=document.createElement('option');o.textContent=t;s.appendChild(o);}" \
     "function scanWifi(){" \
     "var s=document.getElementById('wl');" \
-    "s.innerHTML='<option>Scanning...</option>';s.style.display='block';" \
+    "fillSel(s,'Scanning...');s.style.display='block';" \
     "fetch('/wifi/scan').then(r=>r.json()).then(d=>{" \
-    "s.innerHTML=d.networks.map(n=>'<option value=\"'+n.ssid+'\">'+n.ssid+' ('+n.rssi+'dBm)</option>').join('');" \
-    "}).catch(e=>{s.innerHTML='<option>Scan failed</option>';});}" \
+    "s.textContent='';(d.networks||[]).forEach(function(n){" \
+    "var o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+'dBm)';s.appendChild(o);});" \
+    "if(!s.options.length)fillSel(s,'No networks');" \
+    "}).catch(e=>{fillSel(s,'Scan failed');});}" \
     "function sigQ(r){return r>-50?'Excellent':r>-60?'Good':r>-70?'Fair':'Weak';}" \
     "function fmtAge(s){return s>=3600?Math.floor(s/3600)+'h':s>=60?Math.floor(s/60)+'m':s+'s';}" \
     "function fmtBytes(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';" \

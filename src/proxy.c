@@ -17,6 +17,7 @@
 #include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_netif.h"
 
 #include "config.h"
 #include "proxy.h"
@@ -27,6 +28,7 @@ static const char *TAG = "proxy";
 static EventGroupHandle_t proxy_event_group = NULL;
 static EventBits_t proxy_eth_got_ip_bit = 0;
 static volatile int64_t *proxy_watchdog_timestamp = NULL;
+static esp_netif_t *proxy_eth_netif = NULL;
 
 // Statistics
 static uint64_t total_bytes_in = 0;
@@ -424,6 +426,21 @@ static void tcp_server_task(void *pvParameters)
     ESP_LOGI(TAG, "Waiting for Ethernet IP...");
     xEventGroupWaitBits(proxy_event_group, proxy_eth_got_ip_bit, false, true, portMAX_DELAY);
 
+    esp_netif_ip_info_t ip_info = {0};
+    for (int i = 0; i < 50; i++) {
+        if (proxy_eth_netif &&
+            esp_netif_get_ip_info(proxy_eth_netif, &ip_info) == ESP_OK &&
+            ip_info.ip.addr != 0) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (ip_info.ip.addr == 0) {
+        ESP_LOGE(TAG, "No Ethernet IP — not binding :443 on all interfaces");
+        vTaskDelete(NULL);
+        return;
+    }
+
     // Create server socket
     server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (server_socket < 0) {
@@ -438,10 +455,10 @@ static void tcp_server_task(void *pvParameters)
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(PROXY_PORT);
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_addr.s_addr = ip_info.ip.addr;
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
-        ESP_LOGE(TAG, "Socket bind failed");
+        ESP_LOGE(TAG, "Socket bind failed on " IPSTR ":%d", IP2STR(&ip_info.ip), PROXY_PORT);
         close(server_socket);
         vTaskDelete(NULL);
         return;
@@ -454,7 +471,8 @@ static void tcp_server_task(void *pvParameters)
         return;
     }
 
-    ESP_LOGI(TAG, "TCP Server (SSL passthrough) listening on port %d", PROXY_PORT);
+    ESP_LOGI(TAG, "TCP Server (SSL passthrough) listening on " IPSTR ":%d (Ethernet only)",
+             IP2STR(&ip_info.ip), PROXY_PORT);
     ESP_LOGI(TAG, "Ready to forward encrypted SSL/TLS traffic to Powerwall (%s:443) with TTL modification", POWERWALL_IP_STR);
 
     while (1) {
@@ -488,11 +506,12 @@ static void tcp_server_task(void *pvParameters)
 // ===== Public API =====
 
 void proxy_init(EventGroupHandle_t event_group, EventBits_t eth_got_ip_bit,
-                volatile int64_t *watchdog_timestamp)
+                volatile int64_t *watchdog_timestamp, esp_netif_t *eth)
 {
     proxy_event_group = event_group;
     proxy_eth_got_ip_bit = eth_got_ip_bit;
     proxy_watchdog_timestamp = watchdog_timestamp;
+    proxy_eth_netif = eth;
     ESP_LOGI(TAG, "Proxy initialized");
 }
 

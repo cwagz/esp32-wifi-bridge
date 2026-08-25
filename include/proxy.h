@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "esp_netif.h"
 
 // Request log entry for status display
 #define REQUEST_LOG_SIZE 20
@@ -39,9 +40,10 @@ typedef struct {
  * @param event_group Event group for synchronization
  * @param eth_got_ip_bit Bit to wait for before starting server
  * @param watchdog_timestamp Pointer to watchdog timestamp (updated on successful connections)
+ * @param eth Ethernet netif — listen socket is bound to this IP only (not WiFi)
  */
 void proxy_init(EventGroupHandle_t event_group, EventBits_t eth_got_ip_bit,
-                volatile int64_t *watchdog_timestamp);
+                volatile int64_t *watchdog_timestamp, esp_netif_t *eth);
 
 /**
  * Start the proxy server (call after WiFi connects)

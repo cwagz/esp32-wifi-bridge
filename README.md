@@ -24,7 +24,7 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 
 ![ESP32 WiFi Bridge Dashboard](docs/dashboard.png)
 
-The device provides a web-based dashboard accessible on the Ethernet interface showing:
+The device provides a web-based dashboard on **Ethernet only** (port 80). Port 443 (Powerwall passthrough) is also bound to the Ethernet IP. Neither port is reachable via the Tesla Wi‑Fi address. The dashboard shows:
 - WiFi connection status and signal strength
 - Powerwall connectivity
 - Ethernet IP (DHCP or static) with click-to-configure
@@ -100,7 +100,7 @@ Features:
 1. Open the dashboard and click the **Ethernet** tile.
 2. Choose **Static IP**, fill in address / mask / gateway / DNS.
 3. Save — the device reboots onto the new address.
-4. If you cannot reach it, wait ~45 seconds for DHCP fallback, or hold **BOOT** for 3 seconds (also clears the admin password).
+4. If you cannot reach it, wait ~45 seconds for DHCP fallback, or hold **BOOT** for 3 seconds (also clears the admin password). The dashboard is not reachable via the Tesla Wi‑Fi IP.
 
 ### Admin password
 

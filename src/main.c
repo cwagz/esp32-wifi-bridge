@@ -1366,6 +1366,40 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** JSON-escape a string into out (NUL-terminated). Handles ", \\, and control bytes. */
+static void json_escape_str(const char *in, char *out, size_t out_len)
+{
+    size_t j = 0;
+    if (!out || out_len == 0) {
+        return;
+    }
+    if (!in) {
+        out[0] = '\0';
+        return;
+    }
+    for (const unsigned char *p = (const unsigned char *)in; *p && j + 1 < out_len; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (j + 2 >= out_len) {
+                break;
+            }
+            out[j++] = '\\';
+            out[j++] = (char)*p;
+        } else if (*p < 0x20) {
+            if (j + 6 >= out_len) {
+                break;
+            }
+            int n = snprintf(out + j, out_len - j, "\\u%04x", *p);
+            if (n < 0 || (size_t)n >= out_len - j) {
+                break;
+            }
+            j += (size_t)n;
+        } else {
+            out[j++] = (char)*p;
+        }
+    }
+    out[j] = '\0';
+}
+
 /** WiFi scan handler - returns JSON list of networks */
 static esp_err_t wifi_scan_handler(httpd_req_t *req)
 {
@@ -1410,13 +1444,15 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req)
     // Build JSON response
     httpd_resp_set_type(req, "application/json");
 
-    char buf[64];
+    char buf[256];
+    char ssid_json[192];
     httpd_resp_sendstr_chunk(req, "{\"networks\":[");
 
     for (int i = 0; i < ap_count && ap_list; i++) {
+        json_escape_str((const char *)ap_list[i].ssid, ssid_json, sizeof(ssid_json));
         snprintf(buf, sizeof(buf), "%s{\"ssid\":\"%s\",\"rssi\":%d}",
                  i > 0 ? "," : "",
-                 (char *)ap_list[i].ssid,
+                 ssid_json,
                  ap_list[i].rssi);
         httpd_resp_sendstr_chunk(req, buf);
     }
@@ -2125,13 +2161,42 @@ static esp_err_t admin_password_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/** Start the HTTP server (port 80) - serves web UI and OTA */
+/** Start the HTTP server (port 80) - dashboard / OTA on Ethernet only */
+static bool http_local_ip_is_wifi(int sockfd)
+{
+    struct sockaddr_in name;
+    socklen_t namelen = sizeof(name);
+    memset(&name, 0, sizeof(name));
+    if (getsockname(sockfd, (struct sockaddr *)&name, &namelen) != 0) {
+        return false;
+    }
+    if (name.sin_family != AF_INET) {
+        return false;
+    }
+    esp_netif_ip_info_t wifi_ip;
+    if (!wifi_netif || esp_netif_get_ip_info(wifi_netif, &wifi_ip) != ESP_OK || wifi_ip.ip.addr == 0) {
+        return false;
+    }
+    return name.sin_addr.s_addr == wifi_ip.ip.addr;
+}
+
+static esp_err_t http_open_fn(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    if (http_local_ip_is_wifi(sockfd)) {
+        ESP_LOGW(TAG, "Rejected HTTP session on WiFi STA interface");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WEB_HTTP_PORT;
     config.stack_size = 8192;
     config.max_uri_handlers = 24;
+    config.open_fn = http_open_fn;
 
     esp_err_t err = httpd_start(&web_server, &config);
     if (err != ESP_OK) {
@@ -2172,7 +2237,7 @@ static esp_err_t start_http_server(void)
 
 #undef AUTH_URI
 
-    ESP_LOGI(TAG, "HTTP server started on port %d (admin auth %s)",
+    ESP_LOGI(TAG, "HTTP server started on port %d (Ethernet only, admin auth %s)",
              WEB_HTTP_PORT, admin_configured ? "enabled" : "setup required");
     return ESP_OK;
 }
@@ -2689,11 +2754,10 @@ void app_main(void)
 
     // Initialize modules that depend on Ethernet
     remote_ota_init(eth_netif);
-    proxy_init(s_event_group, ETH_GOT_IP_BIT, &last_successful_connection_time);
+    proxy_init(s_event_group, ETH_GOT_IP_BIT, &last_successful_connection_time, eth_netif);
     wifi_metrics_init(s_event_group, WIFI_CONNECTED_BIT, eth_netif);
 
-    // Start HTTP server immediately (on Ethernet interface)
-    // This allows WiFi config even if WiFi credentials are wrong
+    // Start HTTP server on Ethernet (open_fn rejects sessions whose local IP is WiFi)
     start_http_server();
     ESP_LOGI(TAG, "HTTP server started - http://<eth-ip>/");
 
