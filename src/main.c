@@ -2531,6 +2531,13 @@ static esp_err_t init_ethernet(void)
     eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(SPI3_HOST, &spi_devcfg);
     w5500_config.int_gpio_num = W5500_INT_GPIO;
 
+    // W5500 RX is interrupt-driven. The ISR service must exist before
+    // esp_eth_driver_install() adds the INT GPIO handler.
+    esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "gpio_install_isr_service: %s", esp_err_to_name(isr_err));
+    }
+
     // Configure MAC and PHY
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
