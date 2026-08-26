@@ -1,8 +1,8 @@
 {
-  "version": "v1.2.5",
-  "size": 1195184,
+  "version": "v1.2.6",
+  "size": 1196304,
   "url": "https://cwagz.github.io/esp32-wifi-bridge/firmware.bin",
-  "previous_version": "v1.2.4",
-  "previous_size": 1194016,
+  "previous_version": "v1.2.5",
+  "previous_size": 1195184,
   "previous_url": "https://cwagz.github.io/esp32-wifi-bridge/firmware-previous.bin"
 }
