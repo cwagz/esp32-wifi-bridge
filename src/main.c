@@ -619,6 +619,7 @@ static esp_err_t apply_eth_static_ip(void)
         dns.ip.type = ESP_IPADDR_TYPE_V4;
         if (esp_netif_str_to_ip4(dns_str, &dns.ip.u_addr.ip4) == ESP_OK) {
             esp_netif_set_dns_info(eth_netif, ESP_NETIF_DNS_MAIN, &dns);
+            remote_ota_remember_eth_dns(dns.ip.u_addr.ip4.addr, 0);
         }
     }
 
@@ -2457,6 +2458,32 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "~~~~~~~~~~~");
     xEventGroupSetBits(s_event_group, ETH_GOT_IP_BIT);
 
+    {
+        uint32_t main_dns = 0;
+        uint32_t backup_dns = 0;
+        esp_netif_dns_info_t dns_info;
+        memset(&dns_info, 0, sizeof(dns_info));
+        if (esp_netif_get_dns_info(eth_netif, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK &&
+            dns_info.ip.type == ESP_IPADDR_TYPE_V4) {
+            main_dns = dns_info.ip.u_addr.ip4.addr;
+        }
+        memset(&dns_info, 0, sizeof(dns_info));
+        if (esp_netif_get_dns_info(eth_netif, ESP_NETIF_DNS_BACKUP, &dns_info) == ESP_OK &&
+            dns_info.ip.type == ESP_IPADDR_TYPE_V4) {
+            backup_dns = dns_info.ip.u_addr.ip4.addr;
+        }
+        if (eth_cfg.use_static && eth_cfg.dns[0]) {
+            esp_ip4_addr_t parsed;
+            if (esp_netif_str_to_ip4(eth_cfg.dns, &parsed) == ESP_OK) {
+                main_dns = parsed.addr;
+            }
+        }
+        if (!remote_ota_remember_eth_dns(main_dns, backup_dns)) {
+            remote_ota_remember_eth_dns(ip_info->gw.addr, 0);
+        }
+        remote_ota_apply_eth_dns();
+    }
+
     if (web_server && http_listen_addr != 0 &&
         ip_info->ip.addr != 0 && ip_info->ip.addr != http_listen_addr) {
         ESP_LOGW(TAG, "Ethernet IP changed; rebooting to rebind HTTP");
@@ -2485,6 +2512,8 @@ static void wifi_got_ip_handler(void *arg, esp_event_base_t event_base,
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(TAG, "WiFi got IP:" IPSTR, IP2STR(&event->ip_info.ip));
     xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
+    /* Tesla DHCP just overwrote lwIP DNS with 192.168.91.1. Put LAN DNS back. */
+    remote_ota_apply_eth_dns();
 }
 
 /** Initialize W5500 Ethernet */

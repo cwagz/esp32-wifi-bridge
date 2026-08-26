@@ -32,6 +32,12 @@ typedef struct {
  */
 void remote_ota_init(esp_netif_t *netif);
 
+/** Snapshot Ethernet nameservers (DHCP or static). Ignores Tesla AP DNS. */
+bool remote_ota_remember_eth_dns(uint32_t dns_main, uint32_t dns_backup);
+
+/** Push remembered Ethernet DNS into lwIP (call after WiFi DHCP). */
+void remote_ota_apply_eth_dns(void);
+
 /**
  * Get current remote OTA state (thread-safe copy)
  */

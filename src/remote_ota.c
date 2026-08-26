@@ -28,6 +28,8 @@ static const char *TAG = "remote-ota";
 static remote_ota_state_t remote_ota = {0};
 static SemaphoreHandle_t remote_ota_mutex = NULL;
 static esp_netif_t *ota_netif = NULL;
+static uint32_t eth_dns_main = 0;
+static uint32_t eth_dns_backup = 0;
 
 // ===== JSON Parsing Utilities =====
 
@@ -118,48 +120,63 @@ static void json_escape(const char *in, char *out, size_t n)
     out[j] = '\0';
 }
 
-/** Tesla WiFi DHCP overwrites lwIP DNS with the Powerwall AP, which cannot
- *  resolve github.io. Point lwIP at the Ethernet nameservers from DHCP or
- *  the static LAN config. Do not use public resolvers — some VLANs block them. */
-static bool ota_use_ethernet_dns(void)
+/** Tesla WiFi DHCP overwrites lwIP DNS (and esp_netif_get_dns_info) with
+ *  192.168.91.1, which cannot resolve github.io. Snapshot the Ethernet
+ *  nameserver from DHCP/static and force lwIP to use it. */
+static bool dns_on_powerwall_lan(uint32_t addr)
 {
-    if (!ota_netif) {
-        ESP_LOGE(TAG, "OTA DNS: Ethernet netif not ready");
+    esp_ip4_addr_t a = { .addr = addr };
+    return esp_ip4_addr_get_byte(&a, 0) == POWERWALL_IP_ADDR1 &&
+           esp_ip4_addr_get_byte(&a, 1) == POWERWALL_IP_ADDR2 &&
+           esp_ip4_addr_get_byte(&a, 2) == POWERWALL_IP_ADDR3;
+}
+
+bool remote_ota_remember_eth_dns(uint32_t dns_main, uint32_t dns_backup)
+{
+    if (dns_main == 0 || dns_on_powerwall_lan(dns_main)) {
+        ESP_LOGW(TAG, "Not remembering DNS " IPSTR " (empty or Tesla AP)",
+                 IP2STR((esp_ip4_addr_t *)&dns_main));
         return false;
     }
+    eth_dns_main = dns_main;
+    eth_dns_backup = dns_on_powerwall_lan(dns_backup) ? 0 : dns_backup;
+    ESP_LOGI(TAG, "Remembered Ethernet DNS " IPSTR, IP2STR((esp_ip4_addr_t *)&eth_dns_main));
+    return true;
+}
 
-    esp_netif_dns_info_t main_dns;
-    memset(&main_dns, 0, sizeof(main_dns));
-    if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_MAIN, &main_dns) != ESP_OK ||
-        main_dns.ip.type != ESP_IPADDR_TYPE_V4 ||
-        main_dns.ip.u_addr.ip4.addr == 0) {
-        ESP_LOGE(TAG, "OTA DNS: Ethernet has no nameserver (set DNS in static IP, or check DHCP option 6)");
-        return false;
+void remote_ota_apply_eth_dns(void)
+{
+    if (eth_dns_main == 0) {
+        return;
     }
-
     ip_addr_t primary;
-    ip4_addr_t ip4 = { .addr = main_dns.ip.u_addr.ip4.addr };
+    ip4_addr_t ip4 = { .addr = eth_dns_main };
     ip_addr_copy_from_ip4(primary, ip4);
     dns_setserver(0, &primary);
 
     ip_addr_t secondary;
     IP_ADDR4(&secondary, 0, 0, 0, 0);
-    esp_netif_dns_info_t backup;
-    memset(&backup, 0, sizeof(backup));
-    if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_BACKUP, &backup) == ESP_OK &&
-        backup.ip.type == ESP_IPADDR_TYPE_V4 &&
-        backup.ip.u_addr.ip4.addr != 0) {
-        ip4_addr_t b4 = { .addr = backup.ip.u_addr.ip4.addr };
+    if (eth_dns_backup != 0) {
+        ip4_addr_t b4 = { .addr = eth_dns_backup };
         ip_addr_copy_from_ip4(secondary, b4);
     }
     dns_setserver(1, &secondary);
+}
 
-    char a[16];
-    snprintf(a, sizeof(a), IPSTR, IP2STR(&main_dns.ip.u_addr.ip4));
-    if (!ip_addr_isany(&secondary)) {
-        ESP_LOGI(TAG, "OTA DNS %s / " IPSTR " (Ethernet)", a, IP2STR(&backup.ip.u_addr.ip4));
+static bool ota_use_ethernet_dns(void)
+{
+    if (eth_dns_main == 0) {
+        ESP_LOGE(TAG, "OTA DNS: no Ethernet nameserver remembered (set DNS in static IP, or check DHCP option 6)");
+        return false;
+    }
+    remote_ota_apply_eth_dns();
+    if (eth_dns_backup != 0) {
+        ESP_LOGI(TAG, "OTA DNS " IPSTR " / " IPSTR " (Ethernet)",
+                 IP2STR((esp_ip4_addr_t *)&eth_dns_main),
+                 IP2STR((esp_ip4_addr_t *)&eth_dns_backup));
     } else {
-        ESP_LOGI(TAG, "OTA DNS %s (Ethernet DHCP/static)", a);
+        ESP_LOGI(TAG, "OTA DNS " IPSTR " (Ethernet DHCP/static)",
+                 IP2STR((esp_ip4_addr_t *)&eth_dns_main));
     }
     return true;
 }
@@ -587,6 +604,7 @@ void remote_ota_init(esp_netif_t *netif)
 {
     ota_netif = netif;
     remote_ota_mutex = xSemaphoreCreateMutex();
+    remote_ota_apply_eth_dns();
     ESP_LOGI(TAG, "Remote OTA initialized");
 }
 
