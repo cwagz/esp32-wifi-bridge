@@ -23,6 +23,7 @@ typedef struct {
     bool check_in_progress;
     bool install_in_progress;
     int64_t last_check_time;
+    char last_error[80];
 } remote_ota_state_t;
 
 /**
