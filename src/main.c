@@ -2930,7 +2930,7 @@ void app_main(void)
 
     // Static-IP DHCP fallback + BOOT-button recovery
     xTaskCreate(eth_dhcp_fallback_task, "eth_fallback", 3072, NULL, 3, NULL);
-    xTaskCreate(eth_boot_button_task, "eth_boot_btn", 2048, NULL, 3, NULL);
+    xTaskCreate(eth_boot_button_task, "eth_boot_btn", 4096, NULL, 3, NULL);
 
     // Start system monitoring task
     xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
