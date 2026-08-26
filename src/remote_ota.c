@@ -86,6 +86,38 @@ static int version_compare(const char *v1, const char *v2)
     return strcmp(v1, v2);
 }
 
+static void ota_set_error(const char *msg)
+{
+    if (!remote_ota_mutex) {
+        return;
+    }
+    if (xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return;
+    }
+    strncpy(remote_ota.last_error, msg ? msg : "", sizeof(remote_ota.last_error) - 1);
+    remote_ota.last_error[sizeof(remote_ota.last_error) - 1] = '\0';
+    xSemaphoreGive(remote_ota_mutex);
+}
+
+static void json_escape(const char *in, char *out, size_t n)
+{
+    size_t j = 0;
+    if (!in) {
+        out[0] = '\0';
+        return;
+    }
+    for (size_t i = 0; in[i] && j + 2 < n; i++) {
+        char c = in[i];
+        if (c == '"' || c == '\\') {
+            out[j++] = '\\';
+            out[j++] = c;
+        } else if ((unsigned char)c >= 32) {
+            out[j++] = c;
+        }
+    }
+    out[j] = '\0';
+}
+
 /** Tesla WiFi DHCP overwrites lwIP DNS with the Powerwall AP, which cannot
  *  resolve github.io. Point lwIP at the Ethernet nameservers from DHCP or
  *  the static LAN config. Do not use public resolvers — some VLANs block them. */
@@ -168,13 +200,17 @@ static void check_for_remote_update_task(void *pvParameters)
     }
 
     remote_ota.check_in_progress = true;
+    remote_ota.last_error[0] = '\0';
     xSemaphoreGive(remote_ota_mutex);
 
     ESP_LOGI(TAG, "Checking for remote firmware update from GitHub via Ethernet...");
 
+    const char *fail = NULL;
+    char fail_buf[48];
     esp_http_client_handle_t client = NULL;
     esp_netif_t *old_default = NULL;
     if (!ota_bind_ethernet(&old_default)) {
+        fail = "Ethernet has no nameserver";
         ESP_LOGE(TAG, "Cannot reach GitHub: Ethernet DNS not configured");
         goto cleanup;
     }
@@ -189,12 +225,15 @@ static void check_for_remote_update_task(void *pvParameters)
 
     client = esp_http_client_init(&config);
     if (!client) {
+        fail = "HTTP client init failed";
         ESP_LOGE(TAG, "Failed to init HTTP client for update check");
         goto cleanup;
     }
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
+        snprintf(fail_buf, sizeof(fail_buf), "Connect failed: %s", esp_err_to_name(err));
+        fail = fail_buf;
         ESP_LOGE(TAG, "Failed to connect to GitHub: %s (DNS or TLS?)", esp_err_to_name(err));
         goto cleanup;
     }
@@ -203,12 +242,15 @@ static void check_for_remote_update_task(void *pvParameters)
     int status = esp_http_client_get_status_code(client);
     ESP_LOGI(TAG, "version.json HTTP %d, content-length %d", status, content_length);
     if (status != 200) {
+        snprintf(fail_buf, sizeof(fail_buf), "GitHub HTTP %d", status);
+        fail = fail_buf;
         ESP_LOGE(TAG, "Unexpected HTTP status %d fetching version.json", status);
         goto cleanup;
     }
 
     char *buffer = malloc(1025);
     if (!buffer) {
+        fail = "Out of memory";
         ESP_LOGE(TAG, "Failed to allocate buffer for version.json");
         goto cleanup;
     }
@@ -218,6 +260,7 @@ static void check_for_remote_update_task(void *pvParameters)
     while (total < remaining) {
         int n = esp_http_client_read(client, buffer + total, remaining - total);
         if (n < 0) {
+            fail = "Read version.json failed";
             ESP_LOGE(TAG, "Failed to read version.json after %d bytes", total);
             free(buffer);
             goto cleanup;
@@ -229,6 +272,7 @@ static void check_for_remote_update_task(void *pvParameters)
     }
     buffer[total] = '\0';
     if (total == 0) {
+        fail = "Empty version.json";
         ESP_LOGE(TAG, "Empty version.json");
         free(buffer);
         goto cleanup;
@@ -245,6 +289,7 @@ static void check_for_remote_update_task(void *pvParameters)
     uint32_t prev_size = 0;
 
     if (!json_get_string(buffer, "version", version, sizeof(version))) {
+        fail = "Bad version.json";
         ESP_LOGE(TAG, "Failed to parse version from JSON");
         free(buffer);
         goto cleanup;
@@ -273,6 +318,7 @@ static void check_for_remote_update_task(void *pvParameters)
         // Update available if remote version is different
         remote_ota.update_available = (version_compare(version, app_desc->version) != 0);
         remote_ota.previous_available = (strlen(prev_version) > 0 && strcmp(prev_version, "none") != 0);
+        remote_ota.last_error[0] = '\0';
 
         ESP_LOGI(TAG, "Remote version: %s, Current: %s, Update available: %s",
                  version, app_desc->version, remote_ota.update_available ? "yes" : "no");
@@ -281,6 +327,9 @@ static void check_for_remote_update_task(void *pvParameters)
     }
 
 cleanup:
+    if (fail) {
+        ota_set_error(fail);
+    }
     if (client) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -553,9 +602,11 @@ esp_err_t api_update_status_handler(httpd_req_t *req)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
 
-    char response[512];
+    char response[640];
+    char err_esc[96];
 
     if (remote_ota_mutex && xSemaphoreTake(remote_ota_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        json_escape(remote_ota.last_error, err_esc, sizeof(err_esc));
         snprintf(response, sizeof(response),
             "{\"current_version\":\"%s\","
             "\"available_version\":\"%s\","
@@ -565,7 +616,8 @@ esp_err_t api_update_status_handler(httpd_req_t *req)
             "\"previous_available\":%s,"
             "\"check_in_progress\":%s,"
             "\"install_in_progress\":%s,"
-            "\"last_check\":%lld}",
+            "\"last_check\":%lld,"
+            "\"last_error\":\"%s\"}",
             app_desc->version,
             remote_ota.available_version,
             remote_ota.update_available ? "true" : "false",
@@ -574,7 +626,8 @@ esp_err_t api_update_status_handler(httpd_req_t *req)
             remote_ota.previous_available ? "true" : "false",
             remote_ota.check_in_progress ? "true" : "false",
             remote_ota.install_in_progress ? "true" : "false",
-            (long long)remote_ota.last_check_time);
+            (long long)remote_ota.last_check_time,
+            err_esc);
         xSemaphoreGive(remote_ota_mutex);
     } else {
         snprintf(response, sizeof(response),

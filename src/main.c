@@ -1132,7 +1132,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
         ICON_UPDATE " Reboot</button></form>"
-        "<hr><h2>" ICON_LOCK " Admin password</h2>"
+        "<hr><details class=\"adminpw\"><summary><h2>" ICON_LOCK " Admin password " ICON_EXPAND "</h2></summary>"
         "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold BOOT 15 seconds to clear the password if you get locked out.</p>"
         "<form method=\"POST\" action=\"/admin/password\">"
         "<div class=\"form-group\"><label class=\"label\">Current password</label>"
@@ -1142,7 +1142,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<div class=\"form-group\"><label class=\"label\">Confirm new password</label>"
         "<input type=\"password\" name=\"password2\" minlength=\"8\" maxlength=\"64\" autocomplete=\"new-password\" class=\"mt-1\"></div>"
         "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Change password</button>"
-        "</form></div>");
+        "</form></details></div>");
 
     // Statistics card
     {
@@ -1193,8 +1193,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     // WiFi History Chart card
     httpd_resp_sendstr_chunk(req,
-        "<div class=\"card\"><h2>" ICON_CHART " WiFi Signal History (24h)</h2>"
-        "<div class=\"chart-container\"><canvas id=\"wifichart\" width=\"560\" height=\"160\"></canvas></div>"
+        "<div class=\"card\"><h2>" ICON_CHART " WiFi Signal History <span id=\"chspan\" class=\"text-muted text-xs\">(since boot)</span></h2>"
+        "<div class=\"chart-container\"><canvas id=\"wifichart\"></canvas></div>"
         "<div class=\"chart-legend\">"
         "<span><span class=\"dot\" style=\"background:#3b82f6\"></span>Signal (dBm)</span>"
         "<span><span class=\"dot\" style=\"background:#22c55e\"></span>Connected %</span>"
@@ -1280,7 +1280,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
             *out = '\0';
 
             snprintf(buf, sizeof(buf),
-                "<div style=\"color:%s;white-space:nowrap\">%s</div>", color, escaped);
+                "<div style=\"color:%s;white-space:pre-wrap;word-break:break-word\">%s</div>", color, escaped);
             httpd_resp_sendstr_chunk(req, buf);
         }
         xSemaphoreGive(log_mutex);

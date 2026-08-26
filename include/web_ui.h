@@ -28,7 +28,7 @@
 
 #define ICON_MEMORY "<svg class=\"i\" viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"2\"/><rect x=\"8\" y=\"8\" width=\"8\" height=\"8\" fill=\"#1e293b\"/></svg>"
 
-#define ICON_LAN "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M3 3l18 9-18 9V3z\"/></svg>"
+#define ICON_LAN "<svg class=\"i\" viewBox=\"0 0 24 24\"><path fill-rule=\"evenodd\" d=\"M3 5h18a2 2 0 012 2v8a2 2 0 01-2 2h-3.2L16 19H8l-1.8-2H3a2 2 0 01-2-2V7a2 2 0 012-2zm3 3h2v5H6V8zm4 0h2v5h-2V8zm4 0h2v5h-2V8zm4 0h2v5h-2V8z\"/></svg>"
 
 #define ICON_SWAP "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M6 9l-4 4 4 4v-3h8v-2H6V9zm12 6l4-4-4-4v3H10v2h8v3z\"/></svg>"
 
@@ -97,11 +97,17 @@ static const char *DARK_CSS =
     ".alert-warn{background:rgba(234,179,8,0.1);border:1px solid #eab308;color:#fbbf24}"
     // Dividers
     "hr{border:none;border-top:1px solid #334155;margin:1rem 0}"
+    "details.adminpw>summary{cursor:pointer;list-style:none}"
+    "details.adminpw>summary::-webkit-details-marker{display:none}"
+    "details.adminpw>summary h2{margin-bottom:0;display:flex;align-items:center;gap:.4rem}"
+    "details.adminpw[open]>summary{margin-bottom:.75rem}"
+    "details.adminpw[open]>summary svg.i:last-child{transform:rotate(180deg)}"
     // Animations
     "@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}"
     ".animate-pulse{animation:pulse 2s infinite}"
     // Chart styles
-    ".chart-container{position:relative;height:180px;background:#0f172a;border-radius:0.375rem;padding:0.5rem;margin-top:0.5rem}"
+    ".chart-container{position:relative;height:180px;background:#0f172a;border-radius:0.375rem;padding:0.5rem;margin-top:0.5rem;overflow:hidden}"
+    ".chart-container canvas{display:block;width:100%;height:100%}"
     ".chart-legend{display:flex;gap:1rem;justify-content:center;margin-top:0.5rem;font-size:0.75rem}"
     ".chart-legend span{display:flex;align-items:center;gap:0.25rem}"
     ".chart-legend .dot{width:8px;height:8px;border-radius:50%}";
@@ -163,7 +169,7 @@ static const char *DARK_CSS =
     "h+='<tr><td>'+fmtAge(e.age)+'</td><td>'+e.ip+'</td><td>'+e.in+'/'+e.out+'</td><td>'+e.ttfb+'-'+e.ttlb+'ms</td><td style=\"color:'+c+'\">'+(e.ok?'OK':'ERR')+'</td></tr>';});" \
     "document.getElementById('reqtbl').innerHTML=h;" \
     "var logs=d[2];var lh='';logs.logs.forEach(function(l){" \
-    "lh+='<div style=\"color:'+lvlColor(l.lvl)+';white-space:nowrap\">'+escHtml(l.msg)+'</div>';});" \
+    "lh+='<div style=\"color:'+lvlColor(l.lvl)+';white-space:pre-wrap;word-break:break-word\">'+escHtml(l.msg)+'</div>';});" \
     "document.getElementById('logview').innerHTML=lh;" \
     "updAge();})" \
     ".catch(function(){fetching=false;updAge();});}" \
@@ -184,7 +190,7 @@ static const char *DARK_CSS =
     "act.style.display='flex';" \
     "}else if(u.available_version){" \
     "st.textContent='Up to date ('+u.current_version+')';act.style.display='none';" \
-    "}else{st.textContent='Check failed';act.style.display='none';}" \
+    "}else{st.textContent=u.last_error?('Check failed: '+u.last_error):'Check failed';act.style.display='none';}" \
     "if(u.previous_available){rev.style.display='inline-block';}else{rev.style.display='none';}" \
     "}).catch(function(){document.getElementById('update-status').textContent='Check failed';});}" \
     "function installUpdate(){" \
@@ -198,19 +204,26 @@ static const char *DARK_CSS =
     "function drawWifiChart(){" \
     "fetch('/api/wifi-history').then(r=>r.json()).then(function(d){" \
     "var c=document.getElementById('wifichart');if(!c)return;" \
-    "var ctx=c.getContext('2d');var w=c.width,h=c.height;" \
+    "var box=c.parentElement,dpr=window.devicePixelRatio||1;" \
+    "var w=Math.max(120,box.clientWidth),h=Math.max(100,box.clientHeight);" \
+    "c.style.width=w+'px';c.style.height=h+'px';" \
+    "c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);" \
+    "var ctx=c.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);" \
     "ctx.clearRect(0,0,w,h);" \
     "var b=d.buckets;if(!b||b.length===0){" \
     "ctx.fillStyle='#64748b';ctx.font='12px system-ui';ctx.textAlign='center';" \
     "ctx.fillText('No data yet - collecting...',w/2,h/2);return;}" \
-    "var pad={l:35,r:10,t:10,b:25};var cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;" \
+    "var pad={l:36,r:8,t:12,b:22};var cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;" \
+    "var spanMin=b.length*(d.bucket_minutes||5);" \
+    "var title=document.getElementById('chspan');" \
+    "if(title)title.textContent=spanMin>=23*60?'(24h)':'(since boot)';" \
     "ctx.strokeStyle='#334155';ctx.lineWidth=1;" \
     "for(var i=0;i<=4;i++){var y=pad.t+ch*i/4;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();}" \
     "ctx.fillStyle='#64748b';ctx.font='10px system-ui';ctx.textAlign='right';" \
     "ctx.fillText('-30',pad.l-4,pad.t+8);ctx.fillText('-50',pad.l-4,pad.t+ch*0.4+4);" \
-    "ctx.fillText('-70',pad.l-4,pad.t+ch*0.8+4);ctx.fillText('-90',pad.l-4,h-pad.b+4);" \
-    "ctx.textAlign='center';var hrs=[24,18,12,6,0];" \
-    "for(var i=0;i<hrs.length;i++){var x=pad.l+cw*i/(hrs.length-1);ctx.fillText(hrs[i]+'h',x,h-5);}" \
+    "ctx.fillText('-70',pad.l-4,pad.t+ch*0.8+4);ctx.fillText('-90',pad.l-4,h-pad.b);" \
+    "ctx.textAlign='center';" \
+    "for(var i=0;i<5;i++){var x=pad.l+cw*i/4,age=spanMin*(1-i/4),lab=i===4?'now':(age>=60?Math.round(age/60)+'h':Math.round(age)+'m');ctx.fillText(lab,x,h-6);}" \
     "var dx=cw/(b.length-1||1);" \
     "ctx.beginPath();ctx.strokeStyle='rgba(34,197,94,0.3)';ctx.lineWidth=1;" \
     "for(var i=0;i<b.length;i++){var x=pad.l+i*dx,pct=b[i][1],y=pad.t+ch*(1-pct/100);" \
@@ -219,7 +232,7 @@ static const char *DARK_CSS =
     "ctx.beginPath();ctx.strokeStyle='#3b82f6';ctx.lineWidth=2;" \
     "var first=true;for(var i=0;i<b.length;i++){" \
     "var rssi=b[i][0];if(rssi===0)continue;" \
-    "var x=pad.l+i*dx,y=pad.t+ch*((rssi+30)/(-90+30)*-1+1);y=Math.max(pad.t,Math.min(pad.t+ch,y));" \
+    "var x=pad.l+i*dx,y=pad.t+ch*((rssi+30)/(-90+30));y=Math.max(pad.t,Math.min(pad.t+ch,y));" \
     "if(first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);}ctx.stroke();" \
     "var info=document.getElementById('wifiinfo');if(info){" \
     "var csec=d.connected_sec,dsec=d.disconnected_sec,total=csec+dsec;" \
