@@ -44,6 +44,7 @@
 
 #include "config.h"
 #include "web_ui.h"
+#include "favicon_png.h"
 #include "proxy.h"
 #include "remote_ota.h"
 #include "wifi_metrics.h"
@@ -853,21 +854,23 @@ static void check_powerwall_connectivity(void)
 // ===== OTA Update Handlers =====
 // Icons, CSS, and JavaScript are defined in web_ui.h
 
-/** Favicon handler - returns SVG icon */
+/** Favicon handler - PNG so Android Chrome / iOS shortcuts render it */
+static esp_err_t send_png(httpd_req_t *req, const unsigned char *data, size_t len)
+{
+    httpd_resp_set_type(req, "image/png");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=604800");
+    httpd_resp_send(req, (const char *)data, (ssize_t)len);
+    return ESP_OK;
+}
+
 static esp_err_t favicon_handler(httpd_req_t *req)
 {
-    // Simple SVG favicon - blue rounded square with bridge/connection icon
-    static const char *favicon_svg =
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-        "<rect width='32' height='32' rx='6' fill='#3b82f6'/>"
-        "<path d='M6 16h20M16 8v16M10 12l-4 4 4 4M22 12l4 4-4 4' "
-        "stroke='white' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/>"
-        "</svg>";
+    return send_png(req, favicon_png, favicon_png_len);
+}
 
-    httpd_resp_set_type(req, "image/svg+xml");
-    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=604800");
-    httpd_resp_send(req, favicon_svg, strlen(favicon_svg));
-    return ESP_OK;
+static esp_err_t apple_touch_handler(httpd_req_t *req)
+{
+    return send_png(req, apple_touch_png, apple_touch_png_len);
 }
 
 /** OTA status page - modern dark theme with WiFi config */
@@ -944,7 +947,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // Send HTML head and CSS separately (CSS is too large for single buffer)
     httpd_resp_sendstr_chunk(req,
         "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"" FAVICON_SVG "\">"
+        "<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">"
+        "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">"
         "<title>ESP32 WiFi Bridge</title><style>");
     httpd_resp_sendstr_chunk(req, DARK_CSS);
     httpd_resp_sendstr_chunk(req,
@@ -2044,7 +2048,8 @@ static void send_simple_page_begin(httpd_req_t *req, const char *title)
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req,
         "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"" FAVICON_SVG "\">"
+        "<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">"
+        "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">"
         "<title>");
     httpd_resp_sendstr_chunk(req, title);
     httpd_resp_sendstr_chunk(req, "</title><style>");
@@ -2090,7 +2095,7 @@ static bool require_admin(httpd_req_t *req)
 {
     const char *uri = req->uri;
 
-    if (strcmp(uri, "/favicon.ico") == 0) {
+    if (strcmp(uri, "/favicon.ico") == 0 || strcmp(uri, "/apple-touch-icon.png") == 0) {
         return true;
     }
 
@@ -2352,6 +2357,12 @@ static esp_err_t start_http_server(void)
         .handler = favicon_handler,
     };
     httpd_register_uri_handler(web_server, &favicon);
+    httpd_uri_t apple_touch = {
+        .uri = "/apple-touch-icon.png",
+        .method = HTTP_GET,
+        .handler = apple_touch_handler,
+    };
+    httpd_register_uri_handler(web_server, &apple_touch);
 
 #define AUTH_URI(path, meth, fn) do { \
         httpd_uri_t _u = { .uri = (path), .method = (meth), .handler = with_admin, .user_ctx = (void *)(fn) }; \
