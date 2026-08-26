@@ -87,36 +87,66 @@ static int version_compare(const char *v1, const char *v2)
 }
 
 /** Tesla WiFi DHCP overwrites lwIP DNS with the Powerwall AP, which cannot
- *  resolve github.io. Point DNS at the Ethernet nameserver (or 1.1.1.1). */
-static void ota_use_ethernet_dns(void)
+ *  resolve github.io. Point lwIP at the Ethernet nameservers from DHCP or
+ *  the static LAN config. Do not use public resolvers — some VLANs block them. */
+static bool ota_use_ethernet_dns(void)
 {
-    ip_addr_t primary;
-    IP_ADDR4(&primary, 1, 1, 1, 1);
-    if (ota_netif) {
-        esp_netif_dns_info_t info;
-        if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_MAIN, &info) == ESP_OK &&
-            info.ip.type == ESP_IPADDR_TYPE_V4 && info.ip.u_addr.ip4.addr != 0) {
-            ip4_addr_t ip4 = { .addr = info.ip.u_addr.ip4.addr };
-            ip_addr_copy_from_ip4(primary, ip4);
-        }
+    if (!ota_netif) {
+        ESP_LOGE(TAG, "OTA DNS: Ethernet netif not ready");
+        return false;
     }
+
+    esp_netif_dns_info_t main_dns;
+    memset(&main_dns, 0, sizeof(main_dns));
+    if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_MAIN, &main_dns) != ESP_OK ||
+        main_dns.ip.type != ESP_IPADDR_TYPE_V4 ||
+        main_dns.ip.u_addr.ip4.addr == 0) {
+        ESP_LOGE(TAG, "OTA DNS: Ethernet has no nameserver (set DNS in static IP, or check DHCP option 6)");
+        return false;
+    }
+
+    ip_addr_t primary;
+    ip4_addr_t ip4 = { .addr = main_dns.ip.u_addr.ip4.addr };
+    ip_addr_copy_from_ip4(primary, ip4);
     dns_setserver(0, &primary);
+
     ip_addr_t secondary;
-    IP_ADDR4(&secondary, 1, 0, 0, 1);
+    IP_ADDR4(&secondary, 0, 0, 0, 0);
+    esp_netif_dns_info_t backup;
+    memset(&backup, 0, sizeof(backup));
+    if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_BACKUP, &backup) == ESP_OK &&
+        backup.ip.type == ESP_IPADDR_TYPE_V4 &&
+        backup.ip.u_addr.ip4.addr != 0) {
+        ip4_addr_t b4 = { .addr = backup.ip.u_addr.ip4.addr };
+        ip_addr_copy_from_ip4(secondary, b4);
+    }
     dns_setserver(1, &secondary);
-    ESP_LOGI(TAG, "OTA DNS %s / 1.0.0.1", ipaddr_ntoa(&primary));
+
+    char a[16];
+    snprintf(a, sizeof(a), IPSTR, IP2STR(&main_dns.ip.u_addr.ip4));
+    if (!ip_addr_isany(&secondary)) {
+        ESP_LOGI(TAG, "OTA DNS %s / " IPSTR " (Ethernet)", a, IP2STR(&backup.ip.u_addr.ip4));
+    } else {
+        ESP_LOGI(TAG, "OTA DNS %s (Ethernet DHCP/static)", a);
+    }
+    return true;
 }
 
-static esp_netif_t *ota_bind_ethernet(void)
+static bool ota_bind_ethernet(esp_netif_t **old_out)
 {
-    esp_netif_t *old = NULL;
-    if (ota_netif) {
-        old = esp_netif_get_default_netif();
-        esp_netif_set_default_netif(ota_netif);
-        ESP_LOGI(TAG, "Set Ethernet as default interface");
-        ota_use_ethernet_dns();
+    if (old_out) {
+        *old_out = NULL;
     }
-    return old;
+    if (!ota_netif) {
+        ESP_LOGE(TAG, "OTA: Ethernet not ready");
+        return false;
+    }
+    if (old_out) {
+        *old_out = esp_netif_get_default_netif();
+    }
+    esp_netif_set_default_netif(ota_netif);
+    ESP_LOGI(TAG, "Set Ethernet as default interface");
+    return ota_use_ethernet_dns();
 }
 
 // ===== Update Check Task =====
@@ -143,7 +173,11 @@ static void check_for_remote_update_task(void *pvParameters)
     ESP_LOGI(TAG, "Checking for remote firmware update from GitHub via Ethernet...");
 
     esp_http_client_handle_t client = NULL;
-    esp_netif_t *old_default = ota_bind_ethernet();
+    esp_netif_t *old_default = NULL;
+    if (!ota_bind_ethernet(&old_default)) {
+        ESP_LOGE(TAG, "Cannot reach GitHub: Ethernet DNS not configured");
+        goto cleanup;
+    }
 
     esp_http_client_config_t config = {
         .url = REMOTE_OTA_VERSION_URL,
@@ -282,7 +316,10 @@ static void perform_remote_ota_task(void *pvParameters)
     ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
     // Force GitHub traffic through Ethernet (Tesla WiFi has no internet)
-    old_default = ota_bind_ethernet();
+    if (!ota_bind_ethernet(&old_default)) {
+        ESP_LOGE(TAG, "Cannot reach GitHub: Ethernet DNS not configured");
+        goto cleanup;
+    }
     if (ota_netif) {
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ota_netif, &ip_info) == ESP_OK) {
