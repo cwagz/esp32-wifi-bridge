@@ -175,14 +175,18 @@ static const char *DARK_CSS =
     ".catch(function(){fetching=false;updAge();});}" \
     "setInterval(refresh,5000);setInterval(updAge,1000);refresh();" \
     "function checkUpdate(){" \
+    "otaPhase='check';" \
     "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\">Checking...</span>';" \
     "fetch('/api/check-update',{method:'POST'}).then(function(){" \
     "setTimeout(refreshUpdateStatus,2000);});}" \
+    "var otaPhase='';" \
     "function refreshUpdateStatus(){" \
     "fetch('/api/update').then(r=>r.json()).then(function(u){" \
     "var st=document.getElementById('update-status');" \
     "var act=document.getElementById('update-actions');" \
     "var rev=document.getElementById('revert-btn');" \
+    "if(otaPhase==='install'&&!u.install_in_progress){" \
+    "if(u.last_error){otaPhase='';}else{location.reload();return;}}" \
     "if(u.check_in_progress){st.innerHTML='<span class=\"animate-pulse\">Checking...</span>';setTimeout(refreshUpdateStatus,1000);return;}" \
     "if(u.install_in_progress){st.innerHTML='<span class=\"animate-pulse\" style=\"color:#3b82f6\">Installing...</span>';setTimeout(refreshUpdateStatus,2000);return;}" \
     "if(u.update_available){" \
@@ -190,15 +194,25 @@ static const char *DARK_CSS =
     "act.style.display='flex';" \
     "}else if(u.available_version){" \
     "st.textContent='Up to date ('+u.current_version+')';act.style.display='none';" \
-    "}else{st.textContent=u.last_error?('Check failed: '+u.last_error):'Check failed';act.style.display='none';}" \
+    "}else if(u.last_error){" \
+    "st.textContent='Check failed: '+u.last_error;act.style.display='none';" \
+    "}else{st.textContent='Not checked';act.style.display='none';}" \
     "if(u.previous_available){rev.style.display='inline-block';}else{rev.style.display='none';}" \
-    "}).catch(function(){document.getElementById('update-status').textContent='Check failed';});}" \
+    "otaPhase='';" \
+    "}).catch(function(){" \
+    "var st=document.getElementById('update-status');" \
+    "if(otaPhase==='install'){" \
+    "st.innerHTML='<span class=\"animate-pulse\" style=\"color:#eab308\">Rebooting, waiting for device...</span>';" \
+    "setTimeout(refreshUpdateStatus,2000);return;}" \
+    "st.textContent='Check failed (no response)';otaPhase='';});}" \
     "function installUpdate(){" \
     "if(!confirm('Install firmware update? Device will reboot.'))return;" \
+    "otaPhase='install';" \
     "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\" style=\"color:#3b82f6\">Installing...</span>';" \
     "fetch('/api/install-update',{method:'POST'}).then(function(){setTimeout(refreshUpdateStatus,2000);});}" \
     "function revertFirmware(){" \
     "if(!confirm('Revert to previous version? Device will reboot.'))return;" \
+    "otaPhase='install';" \
     "document.getElementById('update-status').innerHTML='<span class=\"animate-pulse\" style=\"color:#eab308\">Reverting...</span>';" \
     "fetch('/api/revert',{method:'POST'}).then(function(){setTimeout(refreshUpdateStatus,2000);});}" \
     "function drawWifiChart(){" \
