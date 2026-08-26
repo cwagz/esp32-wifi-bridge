@@ -16,6 +16,8 @@
 #include "esp_system.h"
 #include "esp_netif.h"
 #include "esp_http_server.h"
+#include "lwip/dns.h"
+#include "lwip/ip_addr.h"
 
 #include "config.h"
 #include "remote_ota.h"
@@ -84,6 +86,38 @@ static int version_compare(const char *v1, const char *v2)
     return strcmp(v1, v2);
 }
 
+/** Tesla WiFi DHCP overwrites lwIP DNS with the Powerwall AP, which cannot
+ *  resolve github.io. Point DNS at the Ethernet nameserver (or 1.1.1.1). */
+static void ota_use_ethernet_dns(void)
+{
+    ip_addr_t primary;
+    IP_ADDR4(&primary, 1, 1, 1, 1);
+    if (ota_netif) {
+        esp_netif_dns_info_t info;
+        if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_MAIN, &info) == ESP_OK &&
+            info.ip.type == ESP_IPADDR_TYPE_V4 && info.ip.u_addr.ip4.addr != 0) {
+            ip_addr_set_ip4_u32(&primary, info.ip.u_addr.ip4.addr);
+        }
+    }
+    dns_setserver(0, &primary);
+    ip_addr_t secondary;
+    IP_ADDR4(&secondary, 1, 0, 0, 1);
+    dns_setserver(1, &secondary);
+    ESP_LOGI(TAG, "OTA DNS %s / 1.0.0.1", ipaddr_ntoa(&primary));
+}
+
+static esp_netif_t *ota_bind_ethernet(void)
+{
+    esp_netif_t *old = NULL;
+    if (ota_netif) {
+        old = esp_netif_get_default_netif();
+        esp_netif_set_default_netif(ota_netif);
+        ESP_LOGI(TAG, "Set Ethernet as default interface");
+        ota_use_ethernet_dns();
+    }
+    return old;
+}
+
 // ===== Update Check Task =====
 
 /** Check for remote firmware updates from GitHub (runs as FreeRTOS task) */
@@ -108,19 +142,12 @@ static void check_for_remote_update_task(void *pvParameters)
     ESP_LOGI(TAG, "Checking for remote firmware update from GitHub via Ethernet...");
 
     esp_http_client_handle_t client = NULL;
-    esp_netif_t *old_default = NULL;
-
-    // Force all traffic through Ethernet by making it the default netif
-    if (ota_netif) {
-        old_default = esp_netif_get_default_netif();
-        esp_netif_set_default_netif(ota_netif);
-        ESP_LOGI(TAG, "Set Ethernet as default interface");
-    }
+    esp_netif_t *old_default = ota_bind_ethernet();
 
     esp_http_client_config_t config = {
         .url = REMOTE_OTA_VERSION_URL,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 15000,
+        .timeout_ms = 20000,
         .buffer_size = 1024,
         .user_agent = "ESP32-WiFi-Bridge/1.0",
     };
@@ -133,29 +160,44 @@ static void check_for_remote_update_task(void *pvParameters)
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect to GitHub: %s (no internet access?)", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to connect to GitHub: %s (DNS or TLS?)", esp_err_to_name(err));
         goto cleanup;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
-    if (content_length <= 0 || content_length > 1024) {
-        ESP_LOGE(TAG, "Invalid content length: %d", content_length);
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "version.json HTTP %d, content-length %d", status, content_length);
+    if (status != 200) {
+        ESP_LOGE(TAG, "Unexpected HTTP status %d fetching version.json", status);
         goto cleanup;
     }
 
-    char *buffer = malloc(content_length + 1);
+    char *buffer = malloc(1025);
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate buffer for version.json");
         goto cleanup;
     }
 
-    int read_len = esp_http_client_read(client, buffer, content_length);
-    if (read_len != content_length) {
-        ESP_LOGE(TAG, "Failed to read version.json: %d/%d", read_len, content_length);
+    int remaining = (content_length > 0 && content_length <= 1024) ? content_length : 1024;
+    int total = 0;
+    while (total < remaining) {
+        int n = esp_http_client_read(client, buffer + total, remaining - total);
+        if (n < 0) {
+            ESP_LOGE(TAG, "Failed to read version.json after %d bytes", total);
+            free(buffer);
+            goto cleanup;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += n;
+    }
+    buffer[total] = '\0';
+    if (total == 0) {
+        ESP_LOGE(TAG, "Empty version.json");
         free(buffer);
         goto cleanup;
     }
-    buffer[read_len] = '\0';
 
     ESP_LOGI(TAG, "Received version.json: %s", buffer);
 
@@ -238,10 +280,9 @@ static void perform_remote_ota_task(void *pvParameters)
     ESP_LOGI(TAG, "URL: %s", url);
     ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
 
-    // Force all traffic through Ethernet
+    // Force GitHub traffic through Ethernet (Tesla WiFi has no internet)
+    old_default = ota_bind_ethernet();
     if (ota_netif) {
-        old_default = esp_netif_get_default_netif();
-        esp_netif_set_default_netif(ota_netif);
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ota_netif, &ip_info) == ESP_OK) {
             ESP_LOGI(TAG, "Using Ethernet - IP: " IPSTR, IP2STR(&ip_info.ip));
@@ -513,7 +554,7 @@ esp_err_t api_check_update_handler(httpd_req_t *req)
     xTaskCreate(
         check_for_remote_update_task,
         "update_check",
-        4096,
+        8192,
         NULL,
         3,
         NULL
