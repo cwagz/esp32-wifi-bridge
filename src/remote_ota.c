@@ -96,7 +96,8 @@ static void ota_use_ethernet_dns(void)
         esp_netif_dns_info_t info;
         if (esp_netif_get_dns_info(ota_netif, ESP_NETIF_DNS_MAIN, &info) == ESP_OK &&
             info.ip.type == ESP_IPADDR_TYPE_V4 && info.ip.u_addr.ip4.addr != 0) {
-            ip_addr_set_ip4_u32(&primary, info.ip.u_addr.ip4.addr);
+            ip4_addr_t ip4 = { .addr = info.ip.u_addr.ip4.addr };
+            ip_addr_copy_from_ip4(primary, ip4);
         }
     }
     dns_setserver(0, &primary);
