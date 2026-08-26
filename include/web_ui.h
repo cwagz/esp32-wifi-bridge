@@ -131,14 +131,14 @@ static const char *DARK_CSS =
     "if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}" \
     "function fmtUptime(s){var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60;" \
     "return d+'d '+h+'h '+m+'m '+sec+'s';}" \
-    "var lastOk=Date.now(),fetching=false;" \
+    "var lastOk=Date.now(),fetching=false,dashDown=false;" \
     "function updAge(){var s=Math.floor((Date.now()-lastOk)/1000);var el=document.getElementById('lastref');" \
     "if(s>30){el.innerHTML='<span style=\"color:#ef4444\">'+s+'s ago (stale)</span>';}else{el.textContent=s+'s ago';}}" \
     "function lvlColor(l){return l==1?'#ef4444':l==2?'#eab308':l==3?'#22c55e':'#94a3b8';}" \
     "function escHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}" \
     "function refresh(){if(fetching)return;fetching=true;" \
     "Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/requests').then(r=>r.json()),fetch('/api/logs').then(r=>r.json())])" \
-    ".then(function(d){fetching=false;lastOk=Date.now();" \
+    ".then(function(d){if(dashDown){location.reload();return;}fetching=false;lastOk=Date.now();" \
     "var st=d[0],r=st.wifi.rssi,sigEl=document.getElementById('sig');" \
     "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';" \
     "sigEl.innerHTML='<span style=\"color:'+sc+'\">'+r+' dBm ('+sigQ(r)+')</span>';}else{sigEl.textContent='-';}" \
@@ -172,7 +172,7 @@ static const char *DARK_CSS =
     "lh+='<div style=\"color:'+lvlColor(l.lvl)+';white-space:pre-wrap;word-break:break-word\">'+escHtml(l.msg)+'</div>';});" \
     "document.getElementById('logview').innerHTML=lh;" \
     "updAge();})" \
-    ".catch(function(){fetching=false;updAge();});}" \
+    ".catch(function(){fetching=false;dashDown=true;updAge();});}" \
     "setInterval(refresh,5000);setInterval(updAge,1000);refresh();" \
     "function checkUpdate(){" \
     "otaPhase='check';" \

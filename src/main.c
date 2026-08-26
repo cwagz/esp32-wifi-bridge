@@ -944,6 +944,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     // Build response - split into chunks for memory efficiency
     httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
 
     // Send HTML head and CSS separately (CSS is too large for single buffer)
     httpd_resp_sendstr_chunk(req,
@@ -2047,6 +2049,7 @@ static esp_err_t ota_rollback_handler(httpd_req_t *req)
 static void send_simple_page_begin(httpd_req_t *req, const char *title)
 {
     httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
     httpd_resp_sendstr_chunk(req,
         "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<link rel=\"icon\" type=\"image/png\" href=\"/favicon.ico\">"
