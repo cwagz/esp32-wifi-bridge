@@ -106,7 +106,7 @@ static const char *DARK_CSS =
     "@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}"
     ".animate-pulse{animation:pulse 2s infinite}"
     // Chart styles
-    ".chart-container{position:relative;height:180px;background:#0f172a;border-radius:0.375rem;padding:0.5rem;margin-top:0.5rem;overflow:hidden}"
+    ".chart-container{position:relative;height:180px;background:#0f172a;border-radius:0.375rem;padding:0.5rem 1rem 0.5rem 0.5rem;margin-top:0.5rem;overflow:hidden}"
     ".chart-container canvas{display:block;width:100%;height:100%}"
     ".chart-legend{display:flex;gap:1rem;justify-content:center;margin-top:0.5rem;font-size:0.75rem}"
     ".chart-legend span{display:flex;align-items:center;gap:0.25rem}"
@@ -205,7 +205,9 @@ static const char *DARK_CSS =
     "fetch('/api/wifi-history').then(r=>r.json()).then(function(d){" \
     "var c=document.getElementById('wifichart');if(!c)return;" \
     "var box=c.parentElement,dpr=window.devicePixelRatio||1;" \
-    "var w=Math.max(120,box.clientWidth),h=Math.max(100,box.clientHeight);" \
+    "var cs=getComputedStyle(box);" \
+    "var w=Math.max(120,box.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight));" \
+    "var h=Math.max(100,box.clientHeight-parseFloat(cs.paddingTop)-parseFloat(cs.paddingBottom));" \
     "c.style.width=w+'px';c.style.height=h+'px';" \
     "c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);" \
     "var ctx=c.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);" \
@@ -213,7 +215,7 @@ static const char *DARK_CSS =
     "var b=d.buckets;if(!b||b.length===0){" \
     "ctx.fillStyle='#64748b';ctx.font='12px system-ui';ctx.textAlign='center';" \
     "ctx.fillText('No data yet - collecting...',w/2,h/2);return;}" \
-    "var pad={l:36,r:8,t:12,b:22};var cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;" \
+    "var pad={l:36,r:22,t:12,b:22};var cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;" \
     "var spanMin=b.length*(d.bucket_minutes||5);" \
     "var title=document.getElementById('chspan');" \
     "if(title)title.textContent=spanMin>=23*60?'(24h)':'(since boot)';" \
