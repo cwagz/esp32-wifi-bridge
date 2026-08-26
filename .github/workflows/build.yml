@@ -44,7 +44,15 @@ jobs:
           echo "OTA URL: https://${OWNER}.github.io/${REPO}/version.json"
 
       - name: Build Firmware
-        run: pio run
+        run: |
+          for i in 1 2 3 4 5; do
+            if pio run; then
+              exit 0
+            fi
+            echo "pio run failed (attempt $i), retrying..."
+            sleep $((i * 15))
+          done
+          exit 1
         env:
           FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
           REMOTE_OTA_VERSION_URL: ${{ steps.version.outputs.ota_url }}
