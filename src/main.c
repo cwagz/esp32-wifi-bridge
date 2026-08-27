@@ -416,6 +416,141 @@ static void load_admin_config(void)
     }
 }
 
+#define SESSION_COUNT 4
+#define SESSION_ID_LEN 16
+#define SESSION_IDLE_US (7LL * 24 * 3600 * 1000000)
+#define SESSION_COOKIE_NAME "sid"
+
+typedef struct {
+    bool used;
+    uint8_t id[SESSION_ID_LEN];
+    int64_t last_us;
+} admin_session_t;
+
+static admin_session_t sessions[SESSION_COUNT];
+
+static void session_clear_all(void)
+{
+    memset(sessions, 0, sizeof(sessions));
+}
+
+static void bytes_to_hex(const uint8_t *in, size_t n, char *out)
+{
+    static const char *h = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[i * 2] = h[in[i] >> 4];
+        out[i * 2 + 1] = h[in[i] & 0xf];
+    }
+    out[n * 2] = '\0';
+}
+
+static bool hex_to_bytes(const char *s, uint8_t *out, size_t n)
+{
+    if (!s || strlen(s) != n * 2) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned v = 0;
+        for (int k = 0; k < 2; k++) {
+            char c = s[i * 2 + k];
+            v <<= 4;
+            if (c >= '0' && c <= '9') v |= (unsigned)(c - '0');
+            else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
+            else return false;
+        }
+        out[i] = (uint8_t)v;
+    }
+    return true;
+}
+
+static bool session_create(char hex_out[SESSION_ID_LEN * 2 + 1])
+{
+    int slot = 0;
+    int64_t now = esp_timer_get_time();
+    int64_t oldest = sessions[0].last_us;
+    for (int i = 0; i < SESSION_COUNT; i++) {
+        if (!sessions[i].used || now - sessions[i].last_us > SESSION_IDLE_US) {
+            slot = i;
+            break;
+        }
+        if (sessions[i].last_us < oldest) {
+            oldest = sessions[i].last_us;
+            slot = i;
+        }
+    }
+    esp_fill_random(sessions[slot].id, SESSION_ID_LEN);
+    sessions[slot].used = true;
+    sessions[slot].last_us = now;
+    bytes_to_hex(sessions[slot].id, SESSION_ID_LEN, hex_out);
+    return true;
+}
+
+static bool session_touch(const char *hex)
+{
+    uint8_t id[SESSION_ID_LEN];
+    if (!hex_to_bytes(hex, id, SESSION_ID_LEN)) return false;
+    int64_t now = esp_timer_get_time();
+    for (int i = 0; i < SESSION_COUNT; i++) {
+        if (!sessions[i].used) continue;
+        if (now - sessions[i].last_us > SESSION_IDLE_US) {
+            sessions[i].used = false;
+            continue;
+        }
+        if (hash_equal(sessions[i].id, id, SESSION_ID_LEN)) {
+            sessions[i].last_us = now;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void session_drop(const char *hex)
+{
+    uint8_t id[SESSION_ID_LEN];
+    if (!hex_to_bytes(hex, id, SESSION_ID_LEN)) return;
+    for (int i = 0; i < SESSION_COUNT; i++) {
+        if (sessions[i].used && hash_equal(sessions[i].id, id, SESSION_ID_LEN)) {
+            sessions[i].used = false;
+            memset(sessions[i].id, 0, SESSION_ID_LEN);
+        }
+    }
+}
+
+static void session_cookie_set(char *buf, size_t len, const char *hex)
+{
+    snprintf(buf, len, SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict", hex);
+}
+
+static void session_cookie_clear(char *buf, size_t len)
+{
+    snprintf(buf, len, SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+}
+
+static bool session_from_req(httpd_req_t *req, char *hex_out, size_t hex_len)
+{
+    char sid[SESSION_ID_LEN * 2 + 1] = {0};
+    size_t sid_len = sizeof(sid);
+    if (httpd_req_get_cookie_val(req, SESSION_COOKIE_NAME, sid, &sid_len) != ESP_OK) {
+        return false;
+    }
+    if (hex_out && hex_len) {
+        strncpy(hex_out, sid, hex_len - 1);
+        hex_out[hex_len - 1] = '\0';
+    }
+    return session_touch(sid);
+}
+
+static bool uri_path_is(const char *uri, const char *path)
+{
+    size_t n = strlen(path);
+    if (strncmp(uri, path, n) != 0) return false;
+    return uri[n] == '\0' || uri[n] == '?';
+}
+
+static bool uri_is_api(const char *uri)
+{
+    return strncmp(uri, "/api/", 5) == 0 || uri_path_is(uri, "/wifi/scan");
+}
+
 static esp_err_t save_admin_password(const char *password)
 {
     uint8_t new_salt[ADMIN_SALT_LEN];
@@ -459,6 +594,7 @@ static void erase_admin_password(void)
     memset(admin_salt, 0, sizeof(admin_salt));
     memset(admin_hash, 0, sizeof(admin_hash));
     admin_configured = false;
+    session_clear_all();
     ESP_LOGW(TAG, "Admin password cleared");
 }
 
@@ -1145,9 +1281,12 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         httpd_resp_sendstr_chunk(req, buf);
     }
     httpd_resp_sendstr_chunk(req,
-        "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
+        "<hr><div class=\"flex\" style=\"gap:0.5rem;flex-wrap:wrap\">"
+        "<form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
         ICON_UPDATE " Reboot</button></form>"
+        "<form method=\"POST\" action=\"/logout\">"
+        "<button type=\"submit\" class=\"btn btn-secondary\">Sign out</button></form></div>"
         "<hr><details class=\"adminpw\"><summary><h2>" ICON_LOCK " Admin password " ICON_EXPAND "</h2></summary>"
         "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold BOOT 15 seconds to clear the password if you get locked out.</p>"
         "<form method=\"POST\" action=\"/admin/password\">"
@@ -2104,19 +2243,131 @@ static esp_err_t send_admin_setup_page(httpd_req_t *req, const char *error_msg)
     return ESP_OK;
 }
 
+static esp_err_t send_login_page(httpd_req_t *req, const char *error_msg)
+{
+    send_simple_page_begin(req, "Sign in");
+    httpd_resp_sendstr_chunk(req, "<h1>" ICON_LOCK " Sign in</h1>");
+    httpd_resp_sendstr_chunk(req,
+        "<p class=\"text-sm text-muted\" style=\"margin-bottom:1rem\">"
+        "Username is <code>" ADMIN_USERNAME "</code>. Session lasts until reboot or 7 days idle. "
+        "Port 443 Powerwall traffic does not use this login.</p>");
+    if (error_msg && error_msg[0]) {
+        httpd_resp_sendstr_chunk(req, "<div class=\"alert alert-warn\" style=\"margin-bottom:0.75rem\">" ICON_WARN " ");
+        httpd_resp_sendstr_chunk(req, error_msg);
+        httpd_resp_sendstr_chunk(req, "</div>");
+    }
+    httpd_resp_sendstr_chunk(req,
+        "<form method=\"POST\" action=\"/login\">"
+        "<div class=\"form-group\"><label class=\"label\">Username</label>"
+        "<input type=\"text\" name=\"username\" autocomplete=\"username\" required class=\"mt-1\"></div>"
+        "<div class=\"form-group\"><label class=\"label\">Password</label>"
+        "<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required class=\"mt-1\"></div>"
+        "<button type=\"submit\" class=\"btn btn-primary\">Sign in</button>"
+        "</form>");
+    send_simple_page_end(req);
+    return ESP_OK;
+}
+
+static esp_err_t login_get_handler(httpd_req_t *req)
+{
+    if (!admin_configured) {
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", "/");
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+    if (session_from_req(req, NULL, 0)) {
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", "/");
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+    return send_login_page(req, NULL);
+}
+
+static esp_err_t login_post_handler(httpd_req_t *req)
+{
+    if (!admin_configured) {
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", "/");
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+
+    char content[256];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        return send_login_page(req, "No data received");
+    }
+    content[received] = '\0';
+
+    char username[32] = {0};
+    char password[ADMIN_MAX_PASSWORD_LEN + 1] = {0};
+    form_get(content, "username", username, sizeof(username));
+    form_get(content, "password", password, sizeof(password));
+    memset(content, 0, sizeof(content));
+
+    uint8_t got[ADMIN_HASH_LEN];
+    hash_admin_password(password, admin_salt, got);
+    bool user_ok = strcmp(username, ADMIN_USERNAME) == 0;
+    bool pass_ok = hash_equal(got, admin_hash, ADMIN_HASH_LEN);
+    memset(got, 0, sizeof(got));
+    memset(password, 0, sizeof(password));
+
+    if (!user_ok || !pass_ok) {
+        vTaskDelay(pdMS_TO_TICKS(ADMIN_AUTH_FAIL_DELAY_MS));
+        ESP_LOGW(TAG, "Admin login failed");
+        return send_login_page(req, "Invalid username or password");
+    }
+
+    char hex[SESSION_ID_LEN * 2 + 1];
+    char cookie[96];
+    session_create(hex);
+    session_cookie_set(cookie, sizeof(cookie), hex);
+    ESP_LOGI(TAG, "Admin login ok");
+
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+static esp_err_t logout_handler(httpd_req_t *req)
+{
+    char sid[SESSION_ID_LEN * 2 + 1] = {0};
+    size_t sid_len = sizeof(sid);
+    if (httpd_req_get_cookie_val(req, SESSION_COOKIE_NAME, sid, &sid_len) == ESP_OK) {
+        session_drop(sid);
+    }
+    char cookie[96];
+    session_cookie_clear(cookie, sizeof(cookie));
+    ESP_LOGI(TAG, "Admin logout");
+
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/login");
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 static bool require_admin(httpd_req_t *req)
 {
     const char *uri = req->uri;
 
-    if (strcmp(uri, "/favicon.ico") == 0 ||
-        strcmp(uri, "/apple-touch-icon.png") == 0 ||
-        strcmp(uri, "/health") == 0) {
+    if (uri_path_is(uri, "/favicon.ico") ||
+        uri_path_is(uri, "/apple-touch-icon.png") ||
+        uri_path_is(uri, "/health") ||
+        uri_path_is(uri, "/login") ||
+        uri_path_is(uri, "/logout")) {
         return true;
     }
 
     if (!admin_configured) {
-        bool allowed = (req->method == HTTP_GET && strcmp(uri, "/") == 0) ||
-                       (req->method == HTTP_POST && strcmp(uri, "/admin/setup") == 0);
+        bool allowed = (req->method == HTTP_GET && uri_path_is(uri, "/")) ||
+                       (req->method == HTTP_POST && uri_path_is(uri, "/admin/setup"));
         if (allowed) {
             return true;
         }
@@ -2126,51 +2377,22 @@ static bool require_admin(httpd_req_t *req)
         return false;
     }
 
-    char hdr[160] = {0};
-    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
-        goto unauthorized;
-    }
-
-    if (strncasecmp(hdr, "Basic ", 6) != 0) {
-        goto unauthorized;
-    }
-    const char *b64 = hdr + 6;
-    while (*b64 == ' ') b64++;
-
-    unsigned char decoded[ADMIN_MAX_PASSWORD_LEN + 16];
-    size_t decoded_len = 0;
-    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
-                              (const unsigned char *)b64, strlen(b64)) != 0) {
-        goto unauthorized;
-    }
-    decoded[decoded_len] = '\0';
-
-    const char *prefix = ADMIN_USERNAME ":";
-    size_t prefix_len = strlen(prefix);
-    bool user_ok = decoded_len > prefix_len &&
-                   strncmp((const char *)decoded, prefix, prefix_len) == 0;
-    bool pass_ok = false;
-    if (user_ok) {
-        const char *password = (const char *)decoded + prefix_len;
-        uint8_t got[ADMIN_HASH_LEN];
-        hash_admin_password(password, admin_salt, got);
-        pass_ok = hash_equal(got, admin_hash, ADMIN_HASH_LEN);
-        memset(got, 0, sizeof(got));
-    }
-    memset(decoded, 0, sizeof(decoded));
-    memset(hdr, 0, sizeof(hdr));
-
-    if (user_ok && pass_ok) {
+    if (session_from_req(req, NULL, 0)) {
         return true;
     }
 
-unauthorized:
-    memset(hdr, 0, sizeof(hdr));
-    vTaskDelay(pdMS_TO_TICKS(ADMIN_AUTH_FAIL_DELAY_MS));
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Powerwall Bridge\"");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_sendstr(req, "Unauthorized");
+    if (uri_is_api(uri)) {
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        httpd_resp_sendstr(req, "{\"error\":\"unauthorized\"}");
+        return false;
+    }
+
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/login");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, NULL, 0);
     return false;
 }
 
@@ -2223,12 +2445,18 @@ static esp_err_t admin_setup_handler(httpd_req_t *req)
         return send_admin_setup_page(req, "Failed to save password");
     }
 
+    char hex[SESSION_ID_LEN * 2 + 1];
+    char cookie[96];
+    session_create(hex);
+    session_cookie_set(cookie, sizeof(cookie), hex);
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+
     send_simple_page_begin(req, "Password saved");
     httpd_resp_sendstr_chunk(req, "<h1>" ICON_LOCK " Password saved</h1>");
     httpd_resp_sendstr_chunk(req,
-        "<p>Sign in as <code>" ADMIN_USERNAME "</code> with the password you just set.</p>"
+        "<p>You are signed in as <code>" ADMIN_USERNAME "</code>.</p>"
         "<p class=\"text-xs text-muted\" style=\"margin:0.75rem 0\">"
-        "If you forget it, hold BOOT for 15 seconds to clear the password (also forces DHCP).</p>"
+        "If you forget the password, hold BOOT for 15 seconds to clear it (also forces DHCP).</p>"
         "<p><a class=\"btn btn-primary\" href=\"/\" style=\"display:inline-block;text-decoration:none;margin-top:0.75rem\">Continue to dashboard</a></p>");
     send_simple_page_end(req);
     return ESP_OK;
@@ -2286,10 +2514,17 @@ static esp_err_t admin_password_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    session_clear_all();
+    char hex[SESSION_ID_LEN * 2 + 1];
+    char cookie[96];
+    session_create(hex);
+    session_cookie_set(cookie, sizeof(cookie), hex);
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+
     send_simple_page_begin(req, "Password changed");
     httpd_resp_sendstr_chunk(req,
         "<h1>" ICON_LOCK " Password changed</h1>"
-        "<p>Reload the dashboard and sign in as <code>" ADMIN_USERNAME "</code> with the new password.</p>"
+        "<p>Other sessions were signed out. This browser stays signed in.</p>"
         "<p><a class=\"btn btn-primary\" href=\"/\" style=\"display:inline-block;text-decoration:none;margin-top:0.75rem\">Back to dashboard</a></p>");
     send_simple_page_end(req);
     return ESP_OK;
@@ -2357,7 +2592,7 @@ static esp_err_t start_http_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WEB_HTTP_PORT;
     config.stack_size = 8192;
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 28;
     config.lru_purge_enable = true;
     config.open_fn = http_open_fn;
 
@@ -2385,6 +2620,24 @@ static esp_err_t start_http_server(void)
         .handler = health_handler,
     };
     httpd_register_uri_handler(web_server, &health);
+    httpd_uri_t login_get = {
+        .uri = "/login",
+        .method = HTTP_GET,
+        .handler = login_get_handler,
+    };
+    httpd_register_uri_handler(web_server, &login_get);
+    httpd_uri_t login_post = {
+        .uri = "/login",
+        .method = HTTP_POST,
+        .handler = login_post_handler,
+    };
+    httpd_register_uri_handler(web_server, &login_post);
+    httpd_uri_t logout = {
+        .uri = "/logout",
+        .method = HTTP_POST,
+        .handler = logout_handler,
+    };
+    httpd_register_uri_handler(web_server, &logout);
 
 #define AUTH_URI(path, meth, fn) do { \
         httpd_uri_t _u = { .uri = (path), .method = (meth), .handler = with_admin, .user_ctx = (void *)(fn) }; \
@@ -2412,7 +2665,7 @@ static esp_err_t start_http_server(void)
 
 #undef AUTH_URI
 
-    ESP_LOGI(TAG, "HTTP server started on port %d (Ethernet bind, admin auth %s)",
+    ESP_LOGI(TAG, "HTTP server started on port %d (Ethernet bind, admin session %s)",
              WEB_HTTP_PORT, admin_configured ? "enabled" : "setup required");
     return ESP_OK;
 }

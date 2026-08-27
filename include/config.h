@@ -183,7 +183,8 @@
 #endif
 
 // ===== Admin Web UI =====
-// HTTP Basic Auth on port 80 (dashboard / OTA / config). Port 443 proxy is unchanged.
+// Session cookie on port 80 (dashboard / OTA / config). Port 443 proxy is unchanged.
+// Login form at /login; RAM sessions (cleared on reboot). Username is ADMIN_USERNAME.
 #ifndef ADMIN_USERNAME
 #define ADMIN_USERNAME "admin"
 #endif

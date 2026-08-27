@@ -137,7 +137,9 @@ static const char *DARK_CSS =
     "function lvlColor(l){return l==1?'#ef4444':l==2?'#eab308':l==3?'#22c55e':'#94a3b8';}" \
     "function escHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}" \
     "function refresh(){if(fetching)return;fetching=true;" \
-    "Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/requests').then(r=>r.json()),fetch('/api/logs').then(r=>r.json())])" \
+    "Promise.all([fetch('/api/status'),fetch('/api/requests'),fetch('/api/logs')])" \
+    ".then(function(rs){if(rs[0].status===401){location.href='/login';return Promise.reject();}" \
+    "return Promise.all(rs.map(function(r){return r.json();}));})" \
     ".then(function(d){if(dashDown){location.reload();return;}fetching=false;lastOk=Date.now();" \
     "var st=d[0],r=st.wifi.rssi,sigEl=document.getElementById('sig');" \
     "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';" \
