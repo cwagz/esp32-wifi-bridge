@@ -874,6 +874,15 @@ static esp_err_t apple_touch_handler(httpd_req_t *req)
     return send_png(req, apple_touch_png, apple_touch_png_len);
 }
 
+/** Liveness for HAProxy. No auth, no Wi-Fi/proxy checks — 200 means httpd is up. */
+static esp_err_t health_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, "ok\n");
+    return ESP_OK;
+}
+
 /** OTA status page - modern dark theme with WiFi config */
 static esp_err_t send_admin_setup_page(httpd_req_t *req, const char *error_msg);
 
@@ -2099,7 +2108,9 @@ static bool require_admin(httpd_req_t *req)
 {
     const char *uri = req->uri;
 
-    if (strcmp(uri, "/favicon.ico") == 0 || strcmp(uri, "/apple-touch-icon.png") == 0) {
+    if (strcmp(uri, "/favicon.ico") == 0 ||
+        strcmp(uri, "/apple-touch-icon.png") == 0 ||
+        strcmp(uri, "/health") == 0) {
         return true;
     }
 
@@ -2347,6 +2358,7 @@ static esp_err_t start_http_server(void)
     config.server_port = WEB_HTTP_PORT;
     config.stack_size = 8192;
     config.max_uri_handlers = 24;
+    config.lru_purge_enable = true;
     config.open_fn = http_open_fn;
 
     esp_err_t err = httpd_start(&web_server, &config);
@@ -2367,6 +2379,12 @@ static esp_err_t start_http_server(void)
         .handler = apple_touch_handler,
     };
     httpd_register_uri_handler(web_server, &apple_touch);
+    httpd_uri_t health = {
+        .uri = "/health",
+        .method = HTTP_GET,
+        .handler = health_handler,
+    };
+    httpd_register_uri_handler(web_server, &health);
 
 #define AUTH_URI(path, meth, fn) do { \
         httpd_uri_t _u = { .uri = (path), .method = (meth), .handler = with_admin, .user_ctx = (void *)(fn) }; \
