@@ -167,6 +167,16 @@ static void log_sanitize(char *s)
     *w = '\0';
 }
 
+static bool log_is_httpd_noise(const char *s)
+{
+    const char *p = strchr(s, ')');
+    if (!p || p[1] != ' ') {
+        return s[0] == '\0';
+    }
+    p += 2;
+    return strncmp(p, "httpd", 5) == 0;
+}
+
 /** Custom log handler to capture logs to ring buffer */
 static int custom_log_vprintf(const char *fmt, va_list args)
 {
@@ -181,15 +191,20 @@ static int custom_log_vprintf(const char *fmt, va_list args)
 
     // Try to capture log (non-blocking to avoid deadlocks)
     if (log_mutex && xSemaphoreTake(log_mutex, 0) == pdTRUE) {
-        log_entry_t *entry = &log_buffer[log_buffer_index];
-        entry->timestamp = esp_timer_get_time() / 1000000;
-
         char temp[LOG_MSG_MAX_LEN + 32];
         va_list args_copy;
         va_copy(args_copy, args);
         vsnprintf(temp, sizeof(temp), fmt, args_copy);
         va_end(args_copy);
         log_sanitize(temp);
+
+        if (temp[0] == '\0' || log_is_httpd_noise(temp)) {
+            xSemaphoreGive(log_mutex);
+            return ret;
+        }
+
+        log_entry_t *entry = &log_buffer[log_buffer_index];
+        entry->timestamp = esp_timer_get_time() / 1000000;
 
         entry->level = 3;
         if (temp[0] == 'E') entry->level = 1;
