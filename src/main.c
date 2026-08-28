@@ -120,8 +120,8 @@ static volatile float chip_temp_c = 0;
 static volatile bool chip_temp_ok = false;
 
 // ===== Log Capture Ring Buffer =====
-#define LOG_BUFFER_SIZE 50
-#define LOG_MSG_MAX_LEN 120
+#define LOG_BUFFER_SIZE 200
+#define LOG_MSG_MAX_LEN 160
 
 typedef struct {
     int64_t timestamp;      // Seconds since boot
@@ -1406,7 +1406,9 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     // Log Viewer card
     httpd_resp_sendstr_chunk(req,
-        "<div class=\"card\"><h2>" ICON_MEMORY " System Logs</h2>"
+        "<div class=\"card\"><div class=\"flex\" style=\"justify-content:space-between;align-items:center;margin-bottom:0.5rem\">"
+        "<h2 style=\"margin:0\">" ICON_MEMORY " System Logs</h2>"
+        "<a class=\"btn btn-secondary\" href=\"/logs.txt\" style=\"text-decoration:none\">Download</a></div>"
         "<div style=\"max-height:200px;overflow-y:auto;font-family:monospace;font-size:0.75rem;background:#0f172a;padding:0.5rem;border-radius:0.375rem\" id=\"logview\">");
 
     if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -2040,7 +2042,7 @@ static esp_err_t api_logs_handler(httpd_req_t *req)
 
     if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         bool first = true;
-        char buf[320];
+        char buf[1024];
 
         for (int i = 0; i < LOG_BUFFER_SIZE; i++) {
             // Read in reverse order (most recent first)
@@ -2049,7 +2051,7 @@ static esp_err_t api_logs_handler(httpd_req_t *req)
             if (e->timestamp == 0 && e->message[0] == '\0') continue;
 
             // Escape special JSON characters in message (limit to 100 chars to fit buffer)
-            char escaped[128];
+            char escaped[LOG_MSG_MAX_LEN * 5];
             char *out = escaped;
             for (const char *in = e->message; *in && (out - escaped) < (int)sizeof(escaped) - 6; in++) {
                 switch (*in) {
@@ -2080,7 +2082,53 @@ static esp_err_t api_logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/** API endpoint for WiFi metrics history (24 hours of 5-minute buckets) */
+static const char *log_level_letter(uint8_t level)
+{
+    switch (level) {
+        case 1: return "E";
+        case 2: return "W";
+        case 3: return "I";
+        case 4: return "D";
+        default: return "V";
+    }
+}
+
+/** Plain-text log download for off-device debugging */
+static esp_err_t logs_txt_handler(httpd_req_t *req)
+{
+    char disp[72];
+    snprintf(disp, sizeof(disp),
+             "attachment; filename=\"bridge-logs-%llds.txt\"",
+             (long long)(esp_timer_get_time() / 1000000));
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    char head[192];
+    snprintf(head, sizeof(head),
+             "# ESP32 WiFi Bridge %s  uptime %llds  heap %lu KB\n",
+             app && app->version ? app->version : "?",
+             (long long)(esp_timer_get_time() / 1000000),
+             (unsigned long)(esp_get_free_heap_size() / 1024));
+    httpd_resp_sendstr_chunk(req, head);
+
+    if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        char line[LOG_MSG_MAX_LEN + 48];
+        for (int i = 0; i < LOG_BUFFER_SIZE; i++) {
+            int idx = (log_buffer_index + i) % LOG_BUFFER_SIZE;
+            log_entry_t *e = &log_buffer[idx];
+            if (e->timestamp == 0 && e->message[0] == '\0') continue;
+            snprintf(line, sizeof(line), "[%llds] %s %s\n",
+                     (long long)e->timestamp, log_level_letter(e->level), e->message);
+            httpd_resp_sendstr_chunk(req, line);
+        }
+        xSemaphoreGive(log_mutex);
+    }
+
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
 static esp_err_t api_wifi_history_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
@@ -2655,6 +2703,7 @@ static esp_err_t start_http_server(void)
     AUTH_URI("/api/rssi", HTTP_GET, api_rssi_handler);
     AUTH_URI("/api/requests", HTTP_GET, api_requests_handler);
     AUTH_URI("/api/logs", HTTP_GET, api_logs_handler);
+    AUTH_URI("/logs.txt", HTTP_GET, logs_txt_handler);
     AUTH_URI("/api/wifi-history", HTTP_GET, api_wifi_history_handler);
     AUTH_URI("/api/update", HTTP_GET, api_update_status_handler);
     AUTH_URI("/api/check-update", HTTP_POST, api_check_update_handler);
