@@ -134,6 +134,39 @@ static int log_buffer_index = 0;
 static SemaphoreHandle_t log_mutex = NULL;
 static vprintf_like_t original_vprintf = NULL;
 
+static void log_sanitize(char *s)
+{
+    char *r = s, *w = s;
+    while (*r) {
+        if (*r == '\x1b' && r[1] == '[') {
+            r += 2;
+            while (*r && *r != 'm') {
+                r++;
+            }
+            if (*r == 'm') {
+                r++;
+            }
+            continue;
+        }
+        if (*r == '\r') {
+            r++;
+            continue;
+        }
+        if (*r == '\n' || *r == '\t') {
+            if (w > s && w[-1] != ' ') {
+                *w++ = ' ';
+            }
+            r++;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    while (w > s && w[-1] == ' ') {
+        w--;
+    }
+    *w = '\0';
+}
+
 /** Custom log handler to capture logs to ring buffer */
 static int custom_log_vprintf(const char *fmt, va_list args)
 {
@@ -151,28 +184,22 @@ static int custom_log_vprintf(const char *fmt, va_list args)
         log_entry_t *entry = &log_buffer[log_buffer_index];
         entry->timestamp = esp_timer_get_time() / 1000000;
 
-        // Parse log level from format (ESP-IDF format: "X (tag) message")
         char temp[LOG_MSG_MAX_LEN + 32];
         va_list args_copy;
         va_copy(args_copy, args);
         vsnprintf(temp, sizeof(temp), fmt, args_copy);
         va_end(args_copy);
+        log_sanitize(temp);
 
-        // Determine level from first character
-        entry->level = 3;  // Default INFO
+        entry->level = 3;
         if (temp[0] == 'E') entry->level = 1;
         else if (temp[0] == 'W') entry->level = 2;
         else if (temp[0] == 'I') entry->level = 3;
         else if (temp[0] == 'D') entry->level = 4;
         else if (temp[0] == 'V') entry->level = 5;
 
-        // Copy message, strip trailing newline
         strncpy(entry->message, temp, LOG_MSG_MAX_LEN - 1);
         entry->message[LOG_MSG_MAX_LEN - 1] = '\0';
-        size_t len = strlen(entry->message);
-        if (len > 0 && entry->message[len - 1] == '\n') {
-            entry->message[len - 1] = '\0';
-        }
 
         log_buffer_index = (log_buffer_index + 1) % LOG_BUFFER_SIZE;
         xSemaphoreGive(log_mutex);
@@ -2082,17 +2109,6 @@ static esp_err_t api_logs_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static const char *log_level_letter(uint8_t level)
-{
-    switch (level) {
-        case 1: return "E";
-        case 2: return "W";
-        case 3: return "I";
-        case 4: return "D";
-        default: return "V";
-    }
-}
-
 /** Plain-text log download for off-device debugging */
 static esp_err_t logs_txt_handler(httpd_req_t *req)
 {
@@ -2114,13 +2130,13 @@ static esp_err_t logs_txt_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, head);
 
     if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-        char line[LOG_MSG_MAX_LEN + 48];
+        char line[LOG_MSG_MAX_LEN + 32];
         for (int i = 0; i < LOG_BUFFER_SIZE; i++) {
             int idx = (log_buffer_index + i) % LOG_BUFFER_SIZE;
             log_entry_t *e = &log_buffer[idx];
             if (e->timestamp == 0 && e->message[0] == '\0') continue;
-            snprintf(line, sizeof(line), "[%llds] %s %s\n",
-                     (long long)e->timestamp, log_level_letter(e->level), e->message);
+            snprintf(line, sizeof(line), "[%llds] %s\n",
+                     (long long)e->timestamp, e->message);
             httpd_resp_sendstr_chunk(req, line);
         }
         xSemaphoreGive(log_mutex);
