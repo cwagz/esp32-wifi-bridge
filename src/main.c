@@ -461,6 +461,7 @@ static void load_admin_config(void)
 #define SESSION_COUNT 4
 #define SESSION_ID_LEN 16
 #define SESSION_IDLE_US (7LL * 24 * 3600 * 1000000)
+#define SESSION_COOKIE_MAX_AGE 604800
 #define SESSION_COOKIE_NAME "sid"
 
 typedef struct {
@@ -559,7 +560,8 @@ static void session_drop(const char *hex)
 
 static void session_cookie_set(char *buf, size_t len, const char *hex)
 {
-    snprintf(buf, len, SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict", hex);
+    snprintf(buf, len, SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d",
+             hex, SESSION_COOKIE_MAX_AGE);
 }
 
 static void session_cookie_clear(char *buf, size_t len)
@@ -1450,7 +1452,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"card\"><div class=\"flex\" style=\"justify-content:space-between;align-items:center;margin-bottom:0.5rem\">"
         "<h2 style=\"margin:0\">" ICON_MEMORY " System Logs</h2>"
-        "<a class=\"btn btn-secondary\" href=\"/logs.txt\" style=\"text-decoration:none\">Download</a></div>"
+        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"dlLogs()\">Download</button></div>"
         "<div style=\"max-height:200px;overflow-y:auto;font-family:monospace;font-size:0.75rem;background:#0f172a;padding:0.5rem;border-radius:0.375rem\" id=\"logview\">");
 
     if (log_mutex && xSemaphoreTake(log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {

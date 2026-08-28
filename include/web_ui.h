@@ -136,6 +136,9 @@ static const char *DARK_CSS =
     "if(s>30){el.innerHTML='<span style=\"color:#ef4444\">'+s+'s ago (stale)</span>';}else{el.textContent=s+'s ago';}}" \
     "function lvlColor(l){return l==1?'#ef4444':l==2?'#eab308':l==3?'#22c55e':'#94a3b8';}" \
     "function escHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}" \
+    "function dlLogs(){fetch('/logs.txt').then(function(r){if(r.status===401){location.href='/login';return Promise.reject();}" \
+    "var dis=r.headers.get('Content-Disposition')||'',m=dis.match(/filename=\"([^\"]+)\"/);var name=m?m[1]:'bridge-logs.txt';" \
+    "return r.blob().then(function(b){var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;a.click();URL.revokeObjectURL(a.href);});});}" \
     "function refresh(){if(fetching)return;fetching=true;" \
     "Promise.all([fetch('/api/status'),fetch('/api/requests'),fetch('/api/logs')])" \
     ".then(function(rs){if(rs[0].status===401){location.href='/login';return Promise.reject();}" \
