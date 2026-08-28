@@ -2108,7 +2108,7 @@ static esp_err_t logs_txt_handler(httpd_req_t *req)
     char head[192];
     snprintf(head, sizeof(head),
              "# ESP32 WiFi Bridge %s  uptime %llds  heap %lu KB\n",
-             app && app->version ? app->version : "?",
+             app ? app->version : "?",
              (long long)(esp_timer_get_time() / 1000000),
              (unsigned long)(esp_get_free_heap_size() / 1024));
     httpd_resp_sendstr_chunk(req, head);
