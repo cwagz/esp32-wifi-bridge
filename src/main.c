@@ -10,6 +10,7 @@
 #include <strings.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -573,17 +574,37 @@ static bool request_is_https(httpd_req_t *req)
     return strcasecmp(proto, "https") == 0;
 }
 
+static void cookie_expires_gmt(char *out, size_t len, int offset_sec)
+{
+    time_t now = time(NULL);
+    if (now < 1700000000 || !out || len < 32) {
+        if (out && len) {
+            out[0] = '\0';
+        }
+        return;
+    }
+    time_t exp = now + offset_sec;
+    struct tm tm;
+    gmtime_r(&exp, &tm);
+    strftime(out, len, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+}
+
 static void session_cookie_set(char *buf, size_t len, const char *hex, httpd_req_t *req)
 {
+    char exp[40] = {0};
+    cookie_expires_gmt(exp, sizeof(exp), SESSION_COOKIE_MAX_AGE);
     snprintf(buf, len,
-             SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s",
-             hex, SESSION_COOKIE_MAX_AGE, request_is_https(req) ? "; Secure" : "");
+             SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s%s%s",
+             hex, SESSION_COOKIE_MAX_AGE,
+             exp[0] ? "; Expires=" : "", exp,
+             request_is_https(req) ? "; Secure" : "");
 }
 
 static void session_cookie_clear(char *buf, size_t len, httpd_req_t *req)
 {
     snprintf(buf, len,
-             SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0%s",
+             SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+             "; Expires=Thu, 01 Jan 1970 00:00:00 GMT%s",
              request_is_https(req) ? "; Secure" : "");
 }
 
@@ -2423,16 +2444,20 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     }
 
     char hex[SESSION_ID_LEN * 2 + 1];
-    char cookie[128];
+    char cookie[192];
     session_create(hex);
     session_cookie_set(cookie, sizeof(cookie), hex, req);
     ESP_LOGI(TAG, "Admin login ok%s", request_is_https(req) ? " (secure cookie)" : "");
 
-    httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    httpd_resp_send(req, NULL, 0);
+    httpd_resp_sendstr(req,
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        "<meta http-equiv=\"refresh\" content=\"0;url=/\">"
+        "<title>Signed in</title></head><body>"
+        "<script>location.replace('/');</script>"
+        "<p><a href=\"/\">Continue</a></p></body></html>");
     return ESP_OK;
 }
 
@@ -2443,7 +2468,7 @@ static esp_err_t logout_handler(httpd_req_t *req)
     if (httpd_req_get_cookie_val(req, SESSION_COOKIE_NAME, sid, &sid_len) == ESP_OK) {
         session_drop(sid);
     }
-    char cookie[128];
+    char cookie[192];
     session_cookie_clear(cookie, sizeof(cookie), req);
     ESP_LOGI(TAG, "Admin logout");
 
@@ -2548,7 +2573,7 @@ static esp_err_t admin_setup_handler(httpd_req_t *req)
     }
 
     char hex[SESSION_ID_LEN * 2 + 1];
-    char cookie[128];
+    char cookie[192];
     session_create(hex);
     session_cookie_set(cookie, sizeof(cookie), hex, req);
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
@@ -2618,7 +2643,7 @@ static esp_err_t admin_password_handler(httpd_req_t *req)
 
     session_clear_all();
     char hex[SESSION_ID_LEN * 2 + 1];
-    char cookie[128];
+    char cookie[192];
     session_create(hex);
     session_cookie_set(cookie, sizeof(cookie), hex, req);
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
