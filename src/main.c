@@ -1296,20 +1296,15 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // System info card
     sample_chip_temp();
     char temp_disp[16] = "—";
-    char temp_max_disp[24] = "";
     if (chip_temp_ok) {
         snprintf(temp_disp, sizeof(temp_disp), "%.1f °C", (double)chip_temp_c);
-    }
-    if (chip_temp_max_ok) {
-        snprintf(temp_max_disp, sizeof(temp_max_disp), "max %.1f", (double)chip_temp_max_c);
     }
     httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_MEMORY " System</h2><div class=\"grid\">");
     snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">CPU</div><div class=\"value\" id=\"cpu\">%u%%</div></div>"
         "<div class=\"status-item\"><div class=\"label\">Chip temp</div>"
-        "<div class=\"value\" id=\"temp\" style=\"color:%s\">%s</div>"
-        "<div class=\"text-xs text-muted\" id=\"tempmax\">%s</div></div>",
-        cpu_usage_percent, chip_temp_color(), temp_disp, temp_max_disp);
+        "<div class=\"value\" id=\"temp\" style=\"color:%s\">%s</div></div>",
+        cpu_usage_percent, chip_temp_color(), temp_disp);
     httpd_resp_sendstr_chunk(req, buf);
     snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div>"
@@ -2358,10 +2353,6 @@ static esp_err_t send_login_page(httpd_req_t *req, const char *error_msg)
 {
     send_simple_page_begin(req, "Sign in");
     httpd_resp_sendstr_chunk(req, "<h1>" ICON_LOCK " Sign in</h1>");
-    httpd_resp_sendstr_chunk(req,
-        "<p class=\"text-sm text-muted\" style=\"margin-bottom:1rem\">"
-        "Username is <code>" ADMIN_USERNAME "</code>. Session lasts until reboot or 7 days idle. "
-        "Port 443 Powerwall traffic does not use this login.</p>");
     if (error_msg && error_msg[0]) {
         httpd_resp_sendstr_chunk(req, "<div class=\"alert alert-warn\" style=\"margin-bottom:0.75rem\">" ICON_WARN " ");
         httpd_resp_sendstr_chunk(req, error_msg);
@@ -2369,8 +2360,8 @@ static esp_err_t send_login_page(httpd_req_t *req, const char *error_msg)
     }
     httpd_resp_sendstr_chunk(req,
         "<form method=\"POST\" action=\"/login\">"
-        "<div class=\"form-group\"><label class=\"label\">Username</label>"
-        "<input type=\"text\" name=\"username\" autocomplete=\"username\" required class=\"mt-1\"></div>"
+        "<div class=\"form-group\"><label class=\"label\">Username — " ADMIN_USERNAME "</label>"
+        "<input type=\"text\" name=\"username\" value=\"" ADMIN_USERNAME "\" autocomplete=\"username\" required class=\"mt-1\"></div>"
         "<div class=\"form-group\"><label class=\"label\">Password</label>"
         "<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required class=\"mt-1\"></div>"
         "<button type=\"submit\" class=\"btn btn-primary\">Sign in</button>"
@@ -3184,8 +3175,9 @@ static void system_monitor_task(void *pvParameters)
         // Log system status
         #if configGENERATE_RUN_TIME_STATS
         if (chip_temp_ok) {
-            ESP_LOGI(TAG, "System Status - CPU: %u%%, Temp: %.1f C, Heap: %lu KB free, Min: %lu KB",
+            ESP_LOGI(TAG, "System Status - CPU: %u%%, Temp: %.1f C, Max: %.1f C, Heap: %lu KB free, Min: %lu KB",
                      cpu_usage_percent, (double)chip_temp_c,
+                     chip_temp_max_ok ? (double)chip_temp_max_c : (double)chip_temp_c,
                      (unsigned long)(free_heap / 1024),
                      (unsigned long)(min_free_heap / 1024));
         } else {
