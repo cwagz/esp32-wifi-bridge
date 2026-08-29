@@ -8,6 +8,8 @@ Bridges your LAN to a Tesla Powerwall’s isolated Wi-Fi AP. Encrypted TLS is fo
 **Ethernet `:80`** — dashboard (HTML login, username `admin`).  
 Neither port is bound on the Tesla Wi-Fi address.
 
+![Installed next to a Tesla Powerwall](docs/hardware.jpg)
+
 ## Install
 
 Browser flash (Chrome, Edge, or Opera) from GitHub Pages:
@@ -28,7 +30,7 @@ Locked out: hold **BOOT 15 seconds** — forces DHCP and clears the admin passwo
 
 ## Dashboard
 
-![Dashboard](docs/dashboard.png)
+![Dashboard](docs/dashboard.jpg)
 
 - Wi-Fi RSSI and 24 h chart, Powerwall reachability
 - Ethernet DHCP or static (click the Ethernet tile)
