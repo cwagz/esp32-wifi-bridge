@@ -64,7 +64,7 @@ Put the dashboard behind TLS if you want HTTPS: HAProxy (or similar) to `:80`. H
 - Ethernet **DHCP** or **static IP** (NVS); 45 s gateway-unreachable fallback to DHCP (saved static kept)
 - HTTP and proxy **bound to the Ethernet IP only**
 - mDNS `powerwall.local` (`_powerwall._tcp` :443, `_http._tcp` :80)
-- Admin password: salted SHA-256 in NVS, HTML form, session cookie (`HttpOnly; SameSite=Strict`; `Secure` when `X-Forwarded-Proto: https`)
+- Admin password: salted SHA-256 in NVS, HTML form, session cookie (`HttpOnly; SameSite=Lax`; `Secure` when `X-Forwarded-Proto: https`)
 - Watchdog: idle until the first successful Powerwall proxy, then reboot after 10 min without one
 - NTP over Ethernet, OTA from GitHub Pages, Ethernet DNS snapshot so Wi-Fi cannot steal OTA DNS
 

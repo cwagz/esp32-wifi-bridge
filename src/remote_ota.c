@@ -249,9 +249,23 @@ static void check_for_remote_update_task(void *pvParameters)
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
+        ESP_LOGW(TAG, "GitHub connect failed (%s), retry in 2s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        client = NULL;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        ota_use_ethernet_dns();
+        client = esp_http_client_init(&config);
+        if (!client) {
+            fail = "HTTP client init failed";
+            ESP_LOGE(TAG, "Failed to init HTTP client for update check");
+            goto cleanup;
+        }
+        err = esp_http_client_open(client, 0);
+    }
+    if (err != ESP_OK) {
         snprintf(fail_buf, sizeof(fail_buf), "Connect failed: %s", esp_err_to_name(err));
         fail = fail_buf;
-        ESP_LOGE(TAG, "Failed to connect to GitHub: %s (DNS or TLS?)", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to connect to GitHub: %s (DNS, TLS, or no socket?)", esp_err_to_name(err));
         goto cleanup;
     }
 

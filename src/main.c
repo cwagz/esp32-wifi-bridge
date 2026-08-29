@@ -594,7 +594,7 @@ static void session_cookie_set(char *buf, size_t len, const char *hex, httpd_req
     char exp[40] = {0};
     cookie_expires_gmt(exp, sizeof(exp), SESSION_COOKIE_MAX_AGE);
     snprintf(buf, len,
-             SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s%s%s",
+             SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d%s%s%s",
              hex, SESSION_COOKIE_MAX_AGE,
              exp[0] ? "; Expires=" : "", exp,
              request_is_https(req) ? "; Secure" : "");
@@ -603,7 +603,7 @@ static void session_cookie_set(char *buf, size_t len, const char *hex, httpd_req
 static void session_cookie_clear(char *buf, size_t len, httpd_req_t *req)
 {
     snprintf(buf, len,
-             SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+             SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
              "; Expires=Thu, 01 Jan 1970 00:00:00 GMT%s",
              request_is_https(req) ? "; Secure" : "");
 }

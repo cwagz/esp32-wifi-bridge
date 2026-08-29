@@ -29,7 +29,7 @@ Tagged `v*` releases publish firmware to GitHub Pages. OTA URL is derived from t
 - Ethernet (W5500 SPI): LAN, internet (NTP/OTA)
 - Wi-Fi STA: Powerwall AP only (no internet)
 - Proxy: TCP passthrough :443, no TLS termination
-- HTTP :80: HTML login (`admin`), `HttpOnly; SameSite=Strict` cookie; `Secure` if `X-Forwarded-Proto: https`. `/health` is unauthenticated.
+- HTTP :80: HTML login (`admin`), `HttpOnly; SameSite=Lax` cookie; `Secure` if `X-Forwarded-Proto: https`. `/health` is unauthenticated.
 
 ## Source
 
