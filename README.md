@@ -8,8 +8,6 @@ Bridges your LAN to a Tesla Powerwall’s isolated Wi-Fi AP. Encrypted TLS is fo
 **Ethernet `:80`** — dashboard (HTML login, username `admin`).  
 Neither port is bound on the Tesla Wi-Fi address.
 
-![ESP32-S3 PoE Ethernet board](docs/hardware.jpg)
-
 ## Install
 
 Browser flash (Chrome, Edge, or Opera) from GitHub Pages:
