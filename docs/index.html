@@ -3,55 +3,58 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESP32 WiFi Bridge - Web Flasher</title>
+  <title>ESP32 WiFi Bridge — Web Flasher</title>
   <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 20px; background: #0f172a; color: #e2e8f0; }
     h1 { color: #f8fafc; }
+    h2 { font-size: 1.125rem; color: #f1f5f9; }
     a { color: #3b82f6; }
     .card { background: #1e293b; padding: 1.5rem; border-radius: 0.75rem; margin: 1rem 0; border: 1px solid #334155; }
+    code { font-size: 0.9em; }
     esp-web-install-button { display: block; margin: 1.5rem 0; }
     esp-web-install-button button { background: #3b82f6; color: white; padding: 0.75rem 1.5rem; border: none; border-radius: 0.5rem; font-size: 1rem; cursor: pointer; }
     esp-web-install-button button:hover { background: #2563eb; }
     ul { padding-left: 1.25rem; }
     li { margin: 0.5rem 0; }
     .version { font-size: 0.875rem; color: #94a3b8; margin-top: 1rem; }
+    .muted { color: #94a3b8; }
   </style>
 </head>
 <body>
   <h1>ESP32 WiFi Bridge</h1>
-  <p>Flash firmware directly from your browser using Web Serial. This bridge forwards encrypted traffic from Ethernet to a Tesla Powerwall over WiFi.</p>
+  <p class="muted">SSL passthrough from Ethernet to a Tesla Powerwall Wi-Fi AP. Flash from this page (Web Serial).</p>
 
   <div class="card">
     <esp-web-install-button manifest="./manifest.json">
       <button slot="activate">Install Firmware</button>
-      <span slot="unsupported">Your browser doesn't support Web Serial. Use Chrome, Edge, or Opera.</span>
+      <span slot="unsupported">Web Serial is not available. Use Chrome, Edge, or Opera.</span>
     </esp-web-install-button>
-    <div class="version" id="version-info">Loading version info...</div>
+    <div class="version" id="version-info">Loading version…</div>
   </div>
 
   <div class="card">
     <h2>Requirements</h2>
     <ul>
-      <li>Chrome, Edge, or Opera browser</li>
-      <li>ESP32-S3-POE-ETH board connected via USB</li>
-      <li>Hold BOOT button while connecting if device doesn't appear</li>
+      <li>Chrome, Edge, or Opera</li>
+      <li>ESP32-S3-POE-ETH on USB</li>
+      <li>Hold BOOT while plugging in if the port does not appear</li>
     </ul>
   </div>
 
   <div class="card">
-    <h2>After Flashing</h2>
+    <h2>After flashing</h2>
     <ul>
-      <li>Connect to the device's Ethernet port</li>
-      <li>Access the web UI at <code>http://powerwall.local/</code></li>
+      <li>Connect Ethernet (PoE or USB power)</li>
+      <li>Open <code>http://powerwall.local/</code> or the Ethernet IP</li>
       <li>Set an admin password (username is <code>admin</code>)</li>
-      <li>Configure your Powerwall WiFi credentials</li>
-      <li>Click the Ethernet tile to set a static LAN IP if you need one</li>
-      <li>Locked out? Hold BOOT 15 seconds to clear the password and force DHCP</li>
+      <li>Save Powerwall Wi-Fi credentials</li>
+      <li>Optional: Ethernet tile → static LAN IP</li>
+      <li>Locked out: hold BOOT 15 seconds (clears password, forces DHCP)</li>
     </ul>
   </div>
 
-  <p><a href="https://github.com/mccahan/esp32-wifi-bridge">View source on GitHub</a></p>
+  <p><a href="https://github.com/mccahan/esp32-wifi-bridge">Source on GitHub</a></p>
 
   <script>
     fetch('./version.json')

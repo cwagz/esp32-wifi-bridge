@@ -1,228 +1,162 @@
-# ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge
+# ESP32-S3-POE-ETH WiFi–Ethernet SSL Bridge
 
-## Quick Install
+Bridges your LAN to a Tesla Powerwall’s isolated Wi-Fi AP. Encrypted TLS is forwarded as-is (no decryption). TTL is set to 64 so the Powerwall sees local traffic.
 
-**Flash directly from your browser (no tools required).**
+![Architecture](docs/architecture.svg)
 
-Tagged releases publish an installer to GitHub Pages:
+**Ethernet `:443`** — Powerwall passthrough (no login).  
+**Ethernet `:80`** — dashboard (HTML login, username `admin`).  
+Neither port is bound on the Tesla Wi-Fi address.
 
-`https://<your-github-username>.github.io/esp32-wifi-bridge/`
+![ESP32-S3 PoE Ethernet board](docs/hardware.jpg)
 
-Connect your ESP32-S3-POE-ETH board via USB and click "Install". Works with Chrome, Edge, and Opera.
+## Install
 
-Remote OTA uses that same Pages URL. Forks do **not** need `config.local.h` or edits to `config.h`: tagged CI and local builds take the URL from the GitHub remote (`https://<owner>.github.io/<repo>/version.json`). Enable **Settings → Pages → Deploy from a branch → gh-pages**.
+Browser flash (Chrome, Edge, or Opera) from GitHub Pages:
 
----
+**https://cwagz.github.io/esp32-wifi-bridge/**
 
-This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet SSL bridge that:
-- Accepts SSL/TLS connections on Ethernet (port 443)
-- **Forwards encrypted traffic without decryption** (SSL passthrough)
-- Modifies TTL (Time-To-Live) to hide that traffic originates from outside the network
-- Forwards to Tesla Powerwall at 192.168.91.1 over WiFi
+USB to the board, click **Install**. Tagged CI publishes `firmware.bin` and `version.json` there. Remote OTA uses the same URL. Enable **Settings → Pages → Deploy from a branch → `gh-pages`**. Forks do not need `config.local.h`.
 
-## Web Dashboard
+After flash:
 
-![ESP32 WiFi Bridge Dashboard](docs/dashboard.png)
+1. Plug Ethernet (PoE or USB power).
+2. Open `http://powerwall.local/` or `http://<ethernet-ip>/`.
+3. Set the admin password (first boot).
+4. Save the Powerwall Wi-Fi SSID/password.
+5. Optional: Ethernet tile → static IP.
 
-The device provides a web-based dashboard on **Ethernet only** (port 80). Port 443 (Powerwall passthrough) is also bound to the Ethernet IP. Neither port is reachable via the Tesla Wi‑Fi address. The dashboard shows:
-- WiFi connection status and signal strength
-- Powerwall connectivity
-- Ethernet IP (DHCP or static) with click-to-configure
-- System metrics (CPU, heap, uptime)
-- Proxy statistics (requests, bytes, success rate)
-- WiFi signal history chart (24 hours)
-- OTA firmware updates
+Locked out: hold **BOOT 15 seconds** — forces DHCP and clears the admin password.
+
+## Dashboard
+
+![Dashboard](docs/dashboard.png)
+
+- Wi-Fi RSSI and 24 h chart, Powerwall reachability
+- Ethernet DHCP or static (click the Ethernet tile)
+- CPU, chip temp, heap, uptime, proxy stats
+- HTML login + 7-day session cookie (re-login after reboot/OTA)
+- Download logs (last 200 lines, HAProxy `httpd*` noise omitted)
+- Local upload or GitHub remote OTA
+
+Put the dashboard behind TLS if you want HTTPS: HAProxy (or similar) to `:80`. Health checks should `GET /health` and expect **200**. Do not send a password; `/health` is unauthenticated on purpose.
 
 ## Hardware
 
-- **Board**: ESP32-S3-POE-ETH (Waveshare)
-- **Ethernet Controller**: W5500 (SPI)
-- **Framework**: ESP-IDF (native, not Arduino)
+| | |
+|---|---|
+| Board | Waveshare ESP32-S3-POE-ETH |
+| PHY | W5500 over SPI |
+| Framework | ESP-IDF (PlatformIO `espressif32@6.9.0`) |
 
-### Pin Configuration
-
-| Function | GPIO |
-|----------|------|
-| MISO     | 12   |
-| MOSI     | 11   |
-| SCLK     | 13   |
-| CS       | 14   |
-| INT      | 10   |
+| SPI | GPIO |
+|---|---|
+| MISO | 12 |
+| MOSI | 11 |
+| SCLK | 13 |
+| CS | 14 |
+| INT | 10 |
+| BOOT (hold 15 s) | 0 |
 
 ## Features
 
-- **WiFi Client**: Connects to Tesla Powerwall AP (192.168.91.1)
-- **SSL Passthrough**: Forwards encrypted SSL/TLS traffic without decryption
-- **TTL Modification**: Modifies Time-To-Live on outgoing packets to hide external origin
-- **Ethernet IP**: DHCP by default; optional static IP (address, mask, gateway, DNS) via the web UI
-- **DHCP fallback**: If a static IP is set and the gateway is unreachable for 45s with no LAN traffic, the device reboots into DHCP. Saved static settings are kept. Hold **BOOT for 15 seconds** to force DHCP **and** clear the admin password.
-- **mDNS**: Advertises `powerwall.local` with "_powerwall" service on Ethernet interface
-- **Web Dashboard**: Real-time status page with auto-refresh
-- **Admin password**: HTTP Basic Auth on port 80 (username `admin`). First boot asks you to set it. Hold **BOOT for 15 seconds** to clear it (also forces DHCP).
-- **WiFi Metrics**: 24-hour signal strength and connection history with 5-minute averages
-- **NTP Time Sync**: Automatic time synchronization over Ethernet (non-blocking)
-- **OTA Updates**: Upload firmware via web UI or remote GitHub releases
-- **Connection Watchdog**: After the first successful Powerwall proxy, reboot if none succeed for 10 minutes. Idle until that first client — setup will not reboot you.
+- SSL/TLS **passthrough** to `192.168.91.1:443` with **TTL 64**
+- Ethernet **DHCP** or **static IP** (NVS); 45 s gateway-unreachable fallback to DHCP (saved static kept)
+- HTTP and proxy **bound to the Ethernet IP only**
+- mDNS `powerwall.local` (`_powerwall._tcp` :443, `_http._tcp` :80)
+- Admin password: salted SHA-256 in NVS, HTML form, session cookie (`HttpOnly; SameSite=Strict`; `Secure` when `X-Forwarded-Proto: https`)
+- Watchdog: idle until the first successful Powerwall proxy, then reboot after 10 min without one
+- NTP over Ethernet, OTA from GitHub Pages, Ethernet DNS snapshot so Wi-Fi cannot steal OTA DNS
 
-## Architecture
+## Reverse proxy (HAProxy)
 
 ```
-[Ethernet Client] <=SSL/TLS (Encrypted)=> [ESP32-S3 Bridge] <=SSL/TLS (Encrypted)=> [Powerwall WiFi]
-                                           Port 443 proxy
-                                           Port 80 Web UI/OTA
+backend esp32
+    server esp32 192.168.1.39:80
+    option httpchk
+    http-check send meth GET uri /health
+    http-check expect status 200
 ```
 
-This implementation provides **SSL passthrough with TTL modification**:
-- **No TLS Termination**: Traffic remains encrypted end-to-end
-- **TCP Forwarding**: Simple socket-to-socket forwarding of encrypted data
-- **TTL Modification**: Sets TTL=64 on outgoing packets to appear as local traffic
-- **Transparent Bridge**: Client connects directly to Powerwall through the bridge
+Send `X-Forwarded-Proto: https` on the TLS frontend so the session cookie is marked `Secure` (Safari will persist it). Check interval around 15–30 s is plenty.
 
-## Web UI & API
+## HTTP
 
-### Dashboard (Port 80)
+Dashboard: `http://powerwall.local/` or `http://<eth-ip>/`  
+First boot: set password. Later: **Username — admin**. Port 443 is not this login.
 
-Access the dashboard at `http://powerwall.local/` or `http://<ethernet-ip>/`
+| Path | Auth | Notes |
+|------|------|--------|
+| `GET /` | session | Dashboard |
+| `GET/POST /login` | no | HTML login |
+| `GET /logout` | no | Clears cookie |
+| `GET /health` | no | `200 ok` for load balancers |
+| `GET /logs.txt` | session | Downloadable log dump |
+| `GET /api/status` | session | JSON (wifi, eth, temp, heap, watchdog) |
+| `GET /api/requests` | session | Recent proxy requests |
+| `GET /api/logs` | session | JSON log ring |
+| `GET /api/wifi-history` | session | 24 h RSSI buckets |
+| `GET /api/update` | session | Remote OTA status |
+| `POST /api/check-update` | session | Check GitHub |
+| `POST /api/install-update` | session | Install from GitHub |
+| `GET /wifi/scan` | session | Scan SSIDs |
+| `POST /wifi/save` | session | Save Wi-Fi |
+| `POST /eth/save` | session | Save Ethernet (reboots) |
+| `POST /admin/setup` | first boot | Set password |
+| `POST /admin/password` | session | Change password |
+| `POST /ota/upload` | session | Upload `.bin` |
+| `POST /reboot` | session | Reboot |
 
-On first boot you will be asked to set an admin password. After that the browser prompts for username **`admin`** and that password. Port 443 (Powerwall traffic) is not authenticated.
-
-Features:
-- Real-time WiFi and Powerwall status
-- Ethernet IP status (click to configure DHCP vs static)
-- System metrics (CPU, memory, uptime)
-- Proxy statistics and request history
-- WiFi signal strength chart (24h history)
-- WiFi configuration
-- Firmware updates (local upload or remote OTA)
+Unauthenticated page requests redirect to `/login`. APIs return JSON `401`.
 
 ### Ethernet static IP
 
-1. Open the dashboard and click the **Ethernet** tile.
-2. Choose **Static IP**, fill in address / mask / gateway / DNS.
-3. Save — the device reboots onto the new address.
-4. If you cannot reach it, wait ~45 seconds for DHCP fallback, or hold **BOOT** for 15 seconds (also clears the admin password). The dashboard is not reachable via the Tesla Wi‑Fi IP.
+1. Dashboard → Ethernet tile → Static IP (address, mask, gateway, DNS).
+2. Save (reboots).
+3. If you lose it: wait ~45 s for DHCP fallback, or hold BOOT 15 s (also clears the admin password).
 
 ### Admin password
 
-1. First visit to `http://powerwall.local/` shows **Set admin password**.
-2. Username is always `admin`. Password is stored as a salted SHA-256 hash in NVS (not in the firmware image).
-3. Change it later from the System card on the dashboard.
-4. Locked out? Hold **BOOT for 15 seconds** — that clears the password and forces DHCP, then set a new one.
-
-### API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Web dashboard |
-| `/api/status` | GET | System status JSON (includes `eth`) |
-| `/api/requests` | GET | Recent proxy requests with TTFB/TTLB |
-| `/api/logs` | GET | System log entries |
-| `/api/wifi-history` | GET | WiFi metrics (24h of 5-min buckets) |
-| `/api/update` | GET | Remote OTA status |
-| `/api/check-update` | POST | Check for GitHub updates |
-| `/api/install-update` | POST | Install update from GitHub |
-| `/wifi/scan` | GET | Scan available WiFi networks |
-| `/wifi/save` | POST | Save WiFi credentials |
-| `/eth/save` | POST | Save Ethernet DHCP/static settings (reboots) |
-| `/admin/setup` | POST | Set admin password (first boot only) |
-| `/admin/password` | POST | Change admin password |
-| `/ota/upload` | POST | Upload firmware binary |
-| `/reboot` | POST | Trigger device reboot |
+Stored as salt + SHA-256 in NVS, not in the firmware image. Change it from the System card (collapsed). Reboot/OTA drops RAM sessions; the cookie may still be in the browser until you sign in again.
 
 ## Configuration
 
-Edit `include/config.h` to customize:
+Compile-time defaults live in [`include/config.h`](include/config.h). Runtime Wi-Fi, Ethernet IP, and the admin password are NVS (dashboard), not git.
+
+OTA URL is derived from the GitHub remote at build time (`https://<owner>.github.io/<repo>/version.json`). Optional gitignored overrides: copy [`include/config.local.h.example`](include/config.local.h.example) to `include/config.local.h`.
 
 ```c
-// WiFi Settings (or configure via Web UI)
-#define WIFI_SSID "TeslaPowerwall"
-#define WIFI_PASSWORD ""
-
-// Powerwall IP
 #define POWERWALL_IP_STR "192.168.91.1"
-
-// Proxy Settings
 #define PROXY_PORT 443
 #define PROXY_TIMEOUT_MS 60000
 #define TTL_VALUE 64
-
-// Ethernet static-IP fallback
 #define ETH_DHCP_FALLBACK_SEC 45
-
-// NTP Settings
-#define NTP_SERVER_PRIMARY "216.239.35.0"    // time.google.com
-#define NTP_SERVER_SECONDARY "216.239.35.4"  // time2.google.com
-
-// WiFi Metrics
-#define WIFI_METRICS_BUCKET_MINUTES 5        // 5-minute averages
-#define WIFI_METRICS_HISTORY_HOURS 24        // 24 hours of history
 ```
 
-Ethernet static vs DHCP is stored in NVS (not compiled in). Configure it from the dashboard.
-
-### Local configuration
-
-You do **not** need a per-fork config file if this repo is on GitHub and Pages is **Deploy from a branch / gh-pages**. The OTA URL is injected at build time.
-
-`include/config.local.h` is optional (gitignored). Use it only to host OTA off GitHub Pages or to change compile-time defaults. Template: `include/config.local.h.example`.
-
-Tesla Wi‑Fi password belongs in the dashboard (NVS), not in a header.
-
-## Building & Deployment
-
-### Build with PlatformIO
+## Build
 
 ```bash
-pio run                    # Build firmware
-pio run -t upload          # Upload via USB
-pio device monitor         # Serial monitor
+pio run                    # build
+pio run -t upload          # USB
+pio device monitor         # serial
+./deploy.sh                # OTA via mDNS
+./deploy.sh -i <IP>        # OTA to one IP
 ```
 
-### OTA Deployment
+Tags `v*` build firmware, GitHub Release, and Pages. Flash wear: OTA alternates `ota_0` / `ota_1`; NVS is not rewritten by OTA.
 
-```bash
-./deploy.sh                # Build and deploy via OTA (mDNS discovery)
-./deploy.sh -a             # Deploy to ALL discovered devices
-./deploy.sh -d -i <IP>     # Deploy to specific IP
-```
+## Layout
 
-## mDNS Discovery
-
-The service can be discovered on the local network as:
-- Hostname: `powerwall.local`
-- Service: `_powerwall._tcp`
-- Port: 443
-
-```bash
-# Discover devices
-dns-sd -B _powerwall._tcp
-```
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `src/main.c` | Core application: web server, WiFi/Ethernet config, OTA, initialization |
-| `src/proxy.c` | SSL passthrough proxy with buffer pool and request logging |
-| `src/remote_ota.c` | GitHub OTA: version checking and firmware updates |
-| `src/wifi_metrics.c` | NTP time sync and WiFi metrics collection |
-| `include/config.h` | All configuration constants |
-| `include/proxy.h` | Proxy module API |
-| `include/wifi_metrics.h` | WiFi metrics API |
-| `include/web_ui.h` | Web UI assets (CSS, JavaScript, icons) |
-
-## Dependencies
-
-Uses ESP-IDF components:
-- `esp_eth` - Ethernet driver with W5500 support
-- `esp_wifi` - WiFi client functionality
-- `esp_netif` - Network interface abstraction
-- `mdns` - mDNS responder
-- `lwip` - TCP/IP stack with SNTP
-- `nvs_flash` - Non-volatile storage
-- `esp_http_server` - HTTP server for web UI
-- `esp_https_ota` - OTA update support
+| Path | Role |
+|------|------|
+| `src/main.c` | Ethernet/Wi-Fi, HTTP, auth, watchdog, log ring |
+| `src/proxy.c` | TLS passthrough, buffer pool, request log |
+| `src/remote_ota.c` | GitHub OTA, Ethernet DNS pin |
+| `src/wifi_metrics.c` | NTP + 24 h RSSI history |
+| `include/config.h` | Compile-time constants |
+| `include/web_ui.h` | CSS / JS / icons |
+| `partitions.csv` | nvs 24 KB, dual 1.75 MB OTA slots |
 
 ## License
 
-This project is provided as-is for use with ESP32-S3-POE-ETH hardware.
+Provided as-is for ESP32-S3-POE-ETH hardware. Fork of [mccahan/esp32-wifi-bridge](https://github.com/mccahan/esp32-wifi-bridge).

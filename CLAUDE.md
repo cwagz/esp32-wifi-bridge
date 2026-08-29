@@ -1,108 +1,78 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for working in this repository.
 
-## Project Overview
+## Overview
 
-ESP32-S3 WiFi-Ethernet SSL bridge that forwards encrypted traffic from Ethernet to a Tesla Powerwall over WiFi. Uses SSL passthrough (no decryption) with TTL modification to appear as local traffic.
+ESP32-S3 WiFi–Ethernet SSL bridge. Forwards encrypted traffic from Ethernet to a Tesla Powerwall Wi-Fi AP. SSL passthrough (no decryption), TTL 64. Dashboard and proxy bind the Ethernet IP only.
 
-## Build Commands
+## Build
 
 ```bash
-pio run                    # Build firmware
-pio run -t upload          # Upload via USB
-pio device monitor         # Serial monitor
-./deploy.sh                # Build and deploy via OTA (mDNS discovery)
-./deploy.sh -a             # Deploy to ALL eligible devices
-./deploy.sh -d -i <IP>     # Deploy only to specific IP
+pio run                    # build
+pio run -t upload          # USB
+pio device monitor         # serial
+./deploy.sh                # OTA via mDNS
+./deploy.sh -a             # all discovered devices
+./deploy.sh -d -i <IP>     # one IP
 ```
+
+Tagged `v*` releases publish firmware to GitHub Pages. OTA URL is derived from the git remote. `include/config.local.h` is optional.
 
 ## Architecture
 
 ```
-[Ethernet Client] <==SSL==> [ESP32 Bridge] <==SSL==> [Powerwall WiFi]
-                            Port 443 proxy
-                            Port 80 Web UI/OTA
+[LAN / HAProxy] --TLS :443--> [ESP32-S3-POE-ETH] --Wi-Fi TLS--> [Powerwall 192.168.91.1]
+                --HTTP :80-->  dashboard (session cookie)
 ```
 
-- **Ethernet (W5500 via SPI)**: Connected to user's network with internet access
-- **WiFi**: Connected to Powerwall's isolated network (192.168.91.x, no internet)
-- **Proxy**: TCP passthrough on port 443, no TLS termination
-- **Web UI**: Status dashboard and OTA updates on port 80. HTTP Basic Auth (username `admin`); first boot must set a password. Port 443 is unauthenticated passthrough.
+- Ethernet (W5500 SPI): LAN, internet (NTP/OTA)
+- Wi-Fi STA: Powerwall AP only (no internet)
+- Proxy: TCP passthrough :443, no TLS termination
+- HTTP :80: HTML login (`admin`), `HttpOnly; SameSite=Strict` cookie; `Secure` if `X-Forwarded-Proto: https`. `/health` is unauthenticated.
 
-## Source Files
+## Source
 
-| File | Purpose |
-|------|---------|
-| `src/main.c` | Core application: web server, WiFi config, OTA, event handlers, initialization |
-| `src/proxy.c` | SSL passthrough proxy: buffer pool, TCP server, request logging |
-| `src/remote_ota.c` | GitHub OTA: version checking, firmware download, update API handlers |
-| `include/config.h` | All configuration constants (pins, ports, timeouts, URLs) |
-| `include/proxy.h` | Proxy module API: stats, request log access |
-| `include/remote_ota.h` | Remote OTA module API |
-| `include/web_ui.h` | Web UI assets: SVG icons, CSS, JavaScript (as C string macros) |
+| File | Role |
+|------|------|
+| `src/main.c` | netif, HTTP, auth, watchdog, BOOT recovery, log ring |
+| `src/proxy.c` | passthrough, buffer pool, request log |
+| `src/remote_ota.c` | GitHub OTA, Ethernet DNS snapshot |
+| `src/wifi_metrics.c` | NTP + RSSI history |
+| `include/config.h` | compile-time constants |
+| `include/web_ui.h` | CSS/JS/icons as C string macros |
 
-## Module Architecture
+## Patterns
 
-The codebase is split into three modules with clear responsibilities:
-
-**main.c** - Application core
-- Network initialization (Ethernet W5500, WiFi station)
-- HTTP server and web UI handlers
-- Event handlers (connect/disconnect)
-- Background tasks (system monitor, WiFi monitor, connection watchdog, Ethernet DHCP fallback, BOOT-button recovery)
-- NVS storage for WiFi credentials and Ethernet static/DHCP settings
-
-**proxy.c** - SSL passthrough proxy
-- Buffer pool for connection handling
-- TCP server accepting connections on port 443
-- Bidirectional forwarding with select()
-- Request logging with TTFB/TTLB metrics
-- Statistics (bytes, requests, success/failure counts)
-
-**remote_ota.c** - Remote firmware updates
-- Fetches version.json from GitHub Pages
-- Compares versions and downloads updates
-- API handlers for /api/update, /api/check-update, /api/install-update, /api/revert
-
-## Important Patterns
-
-- **Dual network interfaces**: HTTP client must specify `if_name` to use Ethernet for internet access (WiFi has no internet)
-- **FreeRTOS tasks**: Must call `vTaskDelete(NULL)` before returning or run forever
-- **String escaping in web_ui.h**: Use single `%` for CSS/JS (not `%%`), only use `%%` in printf format strings
-- **OTA validation**: Firmware marked valid after Ethernet IP obtained to prevent rollback during WiFi config
-- **Buffer pool**: Pre-allocated buffers for proxy connections to avoid malloc per request
-- HTTP dashboard is bound to the Ethernet IP (lwip_bind wrap of :80). Port 443 proxy also binds Ethernet only.
-- Connection watchdog stays idle until the first successful Powerwall proxy, then reboots after `WATCHDOG_TIMEOUT_SEC` with no further success.
-- **Ethernet IP**: Default DHCP. Static config lives in NVS namespace `eth_config`. Apply with `esp_netif_dhcpc_stop` + `esp_netif_set_ip_info` before `esp_eth_start`. DHCP fallback is a one-shot NVS flag (`force_dhcp`) that ignores static for a single boot; saved static settings are not erased.
-- **Lockout recovery**: After static apply, ICMP-ping the gateway for `ETH_DHCP_FALLBACK_SEC`. HTTP `/api/status` or a successful proxy connection cancels fallback. Hold GPIO0 (BOOT) 15 seconds to force DHCP.
+- Dual netifs: HTTP clients must use Ethernet (`if_name`) for internet. Pin DNS to the Ethernet snapshot before Wi-Fi associates.
+- HTTP `:80` bind is wrapped (`__wrap_lwip_bind`) to the Ethernet IP; proxy `:443` likewise.
+- Watchdog idle until first successful Powerwall proxy, then `WATCHDOG_TIMEOUT_SEC`.
+- Ethernet static IP in NVS `eth_config`. Apply `esp_netif_dhcpc_stop` + `esp_netif_set_ip_info` before `esp_eth_start`. `force_dhcp` is one-shot. ICMP gateway for `ETH_DHCP_FALLBACK_SEC`; `/api/status` or a proxy success cancels fallback. GPIO0 BOOT 15 s → DHCP + clear admin password.
+- Login is 200 HTML + `Set-Cookie` then JS/`meta` bounce to `/` (not 302). Safari drops cookies on 302-from-POST.
+- Log ring 200 × 160 chars; skip ESP-IDF `httpd*` tags; strip ANSI.
+- `web_ui.h`: single `%` in CSS/JS; `%%` only in printf formats.
+- Mark OTA valid after Ethernet IP so Wi-Fi setup cannot roll back a good image.
 
 ## Hardware
 
-- Board: ESP32-S3-POE-ETH (Waveshare)
-- Ethernet: W5500 via SPI (MISO=12, MOSI=11, SCLK=13, CS=14, INT=10)
-- Platform pinned to espressif32@6.9.0
+Waveshare ESP32-S3-POE-ETH. W5500 SPI: MISO=12 MOSI=11 SCLK=13 CS=14 INT=10. Platform `espressif32@6.9.0`.
 
-## API Endpoints
+## HTTP (auth unless noted)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Status dashboard |
-| `/api/status` | GET | System status JSON (includes `eth`) |
-| `/api/requests` | GET | Request history with TTFB/TTLB |
-| `/api/logs` | GET | System log entries |
-| `/api/update` | GET | Remote OTA status |
-| `/api/check-update` | POST | Trigger GitHub version check |
-| `/api/install-update` | POST | Install update from GitHub |
-| `/wifi/scan` | GET | Scan WiFi networks |
-| `/wifi/save` | POST | Save WiFi credentials |
-| `/eth/save` | POST | Save Ethernet DHCP/static settings (reboots) |
-| `/ota/upload` | POST | Upload firmware binary |
-| `/reboot` | POST | Trigger reboot |
+| Path | Notes |
+|------|--------|
+| `GET /health` | no auth, `200 ok` |
+| `GET/POST /login`, `GET /logout` | no auth |
+| `GET /logs.txt` | downloadable dump |
+| `GET /api/status` | wifi, eth, temp, temp_max_c, heap, watchdog |
+| `GET /api/requests`, `/api/logs`, `/api/wifi-history` | |
+| `GET /api/update`, `POST /api/check-update`, `POST /api/install-update` | |
+| `GET /wifi/scan`, `POST /wifi/save`, `POST /eth/save` | eth save reboots |
+| `POST /admin/setup` | first boot only |
+| `POST /admin/password`, `POST /ota/upload`, `POST /reboot` | |
 
-## CI/CD
+Pages without a session 302 to `/login`; APIs JSON 401.
 
-- GitHub Actions builds on push to main and on tags
-- Tagged releases (`v*`) deploy to GitHub Pages and create releases
-- ESP Web Tools flasher: GitHub Pages at `https://<owner>.github.io/esp32-wifi-bridge/`
-- Remote OTA URL: tagged CI and git-origin derivation (`https://<owner>.github.io/<repo>/version.json`). `include/config.local.h` is optional.
+## CI
+
+Push to `main` and tags `v*` build firmware. Tags also release + Pages (`https://<owner>.github.io/esp32-wifi-bridge/`).

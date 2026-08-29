@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">ESP32 WiFi–Ethernet SSL bridge</title>
+  <desc id="desc">Home LAN talks TLS to the ESP32 on Ethernet. The ESP32 forwards encrypted traffic over Wi-Fi to the Tesla Powerwall. Dashboard is Ethernet-only on port 80.</desc>
+  <rect width="960" height="360" rx="16" fill="#0f172a"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- Home LAN -->
+  <rect x="32" y="72" width="240" height="200" rx="12" fill="#1e293b" stroke="#334155"/>
+  <text x="152" y="112" text-anchor="middle" fill="#f8fafc" font-family="system-ui,sans-serif" font-size="18" font-weight="600">Home LAN</text>
+  <text x="152" y="140" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">Ethernet · 192.168.1.x</text>
+  <text x="152" y="176" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">HAProxy · browsers</text>
+  <text x="152" y="198" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">Tesla Gateway</text>
+  <text x="152" y="234" text-anchor="middle" fill="#64748b" font-family="system-ui,sans-serif" font-size="12">Internet DNS / NTP / OTA</text>
+
+  <!-- Bridge -->
+  <rect x="360" y="56" width="240" height="232" rx="12" fill="#1e293b" stroke="#3b82f6" stroke-width="2"/>
+  <text x="480" y="100" text-anchor="middle" fill="#f8fafc" font-family="system-ui,sans-serif" font-size="18" font-weight="600">ESP32-S3-POE-ETH</text>
+  <text x="480" y="126" text-anchor="middle" fill="#93c5fd" font-family="system-ui,sans-serif" font-size="13">SSL passthrough bridge</text>
+  <rect x="392" y="148" width="176" height="28" rx="6" fill="#0f172a"/>
+  <text x="480" y="167" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="12">:443 Powerwall proxy</text>
+  <rect x="392" y="186" width="176" height="28" rx="6" fill="#0f172a"/>
+  <text x="480" y="205" text-anchor="middle" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="12">:80 dashboard (auth)</text>
+  <text x="480" y="250" text-anchor="middle" fill="#64748b" font-family="system-ui,sans-serif" font-size="12">TTL 64 · no decryption</text>
+
+  <!-- Powerwall -->
+  <rect x="688" y="72" width="240" height="200" rx="12" fill="#1e293b" stroke="#334155"/>
+  <text x="808" y="112" text-anchor="middle" fill="#f8fafc" font-family="system-ui,sans-serif" font-size="18" font-weight="600">Tesla Powerwall</text>
+  <text x="808" y="140" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="13">Wi-Fi AP · 192.168.91.1</text>
+  <text x="808" y="176" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">Isolated TEG network</text>
+  <text x="808" y="198" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,sans-serif" font-size="14">No internet on this AP</text>
+  <text x="808" y="234" text-anchor="middle" fill="#64748b" font-family="system-ui,sans-serif" font-size="12">TLS end-to-end to :443</text>
+
+  <line x1="272" y1="140" x2="360" y2="140" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="316" y="128" text-anchor="middle" fill="#93c5fd" font-family="ui-monospace,monospace" font-size="11">:443</text>
+  <line x1="272" y1="200" x2="360" y2="200" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="316" y="220" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="11">:80</text>
+  <line x1="600" y1="172" x2="688" y2="172" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="644" y="160" text-anchor="middle" fill="#93c5fd" font-family="ui-monospace,monospace" font-size="11">Wi-Fi :443</text>
+
+  <text x="480" y="332" text-anchor="middle" fill="#64748b" font-family="system-ui,sans-serif" font-size="13">Dashboard and proxy bind the Ethernet IP only — not the Tesla Wi-Fi address.</text>
+</svg>
