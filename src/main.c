@@ -117,7 +117,9 @@ static volatile uint8_t cpu_usage_percent = 0;
 // On-die temperature (°C). chip_temp_ok is false until the first good sample.
 static temperature_sensor_handle_t temp_handle = NULL;
 static volatile float chip_temp_c = 0;
+static volatile float chip_temp_max_c = 0;
 static volatile bool chip_temp_ok = false;
+static volatile bool chip_temp_max_ok = false;
 
 // ===== Log Capture Ring Buffer =====
 #define LOG_BUFFER_SIZE 200
@@ -414,6 +416,10 @@ static void sample_chip_temp(void)
     if (temperature_sensor_get_celsius(temp_handle, &t) == ESP_OK) {
         chip_temp_c = t;
         chip_temp_ok = true;
+        if (!chip_temp_max_ok || t > chip_temp_max_c) {
+            chip_temp_max_c = t;
+            chip_temp_max_ok = true;
+        }
     }
 }
 
@@ -558,15 +564,27 @@ static void session_drop(const char *hex)
     }
 }
 
-static void session_cookie_set(char *buf, size_t len, const char *hex)
+static bool request_is_https(httpd_req_t *req)
 {
-    snprintf(buf, len, SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d",
-             hex, SESSION_COOKIE_MAX_AGE);
+    char proto[16] = {0};
+    if (httpd_req_get_hdr_value_str(req, "X-Forwarded-Proto", proto, sizeof(proto)) != ESP_OK) {
+        return false;
+    }
+    return strcasecmp(proto, "https") == 0;
 }
 
-static void session_cookie_clear(char *buf, size_t len)
+static void session_cookie_set(char *buf, size_t len, const char *hex, httpd_req_t *req)
 {
-    snprintf(buf, len, SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+    snprintf(buf, len,
+             SESSION_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s",
+             hex, SESSION_COOKIE_MAX_AGE, request_is_https(req) ? "; Secure" : "");
+}
+
+static void session_cookie_clear(char *buf, size_t len, httpd_req_t *req)
+{
+    snprintf(buf, len,
+             SESSION_COOKIE_NAME "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0%s",
+             request_is_https(req) ? "; Secure" : "");
 }
 
 static bool session_from_req(httpd_req_t *req, char *hex_out, size_t hex_len)
@@ -1278,15 +1296,20 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // System info card
     sample_chip_temp();
     char temp_disp[16] = "—";
+    char temp_max_disp[24] = "";
     if (chip_temp_ok) {
         snprintf(temp_disp, sizeof(temp_disp), "%.1f °C", (double)chip_temp_c);
+    }
+    if (chip_temp_max_ok) {
+        snprintf(temp_max_disp, sizeof(temp_max_disp), "max %.1f", (double)chip_temp_max_c);
     }
     httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_MEMORY " System</h2><div class=\"grid\">");
     snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">CPU</div><div class=\"value\" id=\"cpu\">%u%%</div></div>"
         "<div class=\"status-item\"><div class=\"label\">Chip temp</div>"
-        "<div class=\"value\" id=\"temp\" style=\"color:%s\">%s</div></div>",
-        cpu_usage_percent, chip_temp_color(), temp_disp);
+        "<div class=\"value\" id=\"temp\" style=\"color:%s\">%s</div>"
+        "<div class=\"text-xs text-muted\" id=\"tempmax\">%s</div></div>",
+        cpu_usage_percent, chip_temp_color(), temp_disp, temp_max_disp);
     httpd_resp_sendstr_chunk(req, buf);
     snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div>"
@@ -1974,10 +1997,16 @@ static esp_err_t api_status_handler(httpd_req_t *req)
 
     sample_chip_temp();
     char temp_json[16];
+    char temp_max_json[16];
     if (chip_temp_ok) {
         snprintf(temp_json, sizeof(temp_json), "%.1f", (double)chip_temp_c);
     } else {
         snprintf(temp_json, sizeof(temp_json), "null");
+    }
+    if (chip_temp_max_ok) {
+        snprintf(temp_max_json, sizeof(temp_max_json), "%.1f", (double)chip_temp_max_c);
+    } else {
+        snprintf(temp_max_json, sizeof(temp_max_json), "null");
     }
 
     bool wd_armed = last_successful_connection_time != 0;
@@ -1995,7 +2024,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
         "\"eth\":{\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
         "\"mode\":\"%s\",\"fallback\":%s},"
-        "\"cpu\":%u,\"temp_c\":%s,\"heap\":%lu,"
+        "\"cpu\":%u,\"temp_c\":%s,\"temp_max_c\":%s,\"heap\":%lu,"
         "\"watchdog\":{\"armed\":%s,\"last_s\":%s,\"timeout_s\":%d},"
         "\"uptime\":%lld,"
         "\"total_bytes_in\":%llu,\"total_bytes_out\":%llu,"
@@ -2009,6 +2038,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         (eth_cfg.using_fallback || eth_cfg.fell_back_last_boot) ? "true" : "false",
         cpu_usage_percent,
         temp_json,
+        temp_max_json,
         (unsigned long)esp_get_free_heap_size(),
         wd_armed ? "true" : "false",
         wd_last,
@@ -2402,10 +2432,10 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     }
 
     char hex[SESSION_ID_LEN * 2 + 1];
-    char cookie[96];
+    char cookie[128];
     session_create(hex);
-    session_cookie_set(cookie, sizeof(cookie), hex);
-    ESP_LOGI(TAG, "Admin login ok");
+    session_cookie_set(cookie, sizeof(cookie), hex, req);
+    ESP_LOGI(TAG, "Admin login ok%s", request_is_https(req) ? " (secure cookie)" : "");
 
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "/");
@@ -2422,8 +2452,8 @@ static esp_err_t logout_handler(httpd_req_t *req)
     if (httpd_req_get_cookie_val(req, SESSION_COOKIE_NAME, sid, &sid_len) == ESP_OK) {
         session_drop(sid);
     }
-    char cookie[96];
-    session_cookie_clear(cookie, sizeof(cookie));
+    char cookie[128];
+    session_cookie_clear(cookie, sizeof(cookie), req);
     ESP_LOGI(TAG, "Admin logout");
 
     httpd_resp_set_status(req, "302 Found");
@@ -2527,9 +2557,9 @@ static esp_err_t admin_setup_handler(httpd_req_t *req)
     }
 
     char hex[SESSION_ID_LEN * 2 + 1];
-    char cookie[96];
+    char cookie[128];
     session_create(hex);
-    session_cookie_set(cookie, sizeof(cookie), hex);
+    session_cookie_set(cookie, sizeof(cookie), hex, req);
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
 
     send_simple_page_begin(req, "Password saved");
@@ -2597,9 +2627,9 @@ static esp_err_t admin_password_handler(httpd_req_t *req)
 
     session_clear_all();
     char hex[SESSION_ID_LEN * 2 + 1];
-    char cookie[96];
+    char cookie[128];
     session_create(hex);
-    session_cookie_set(cookie, sizeof(cookie), hex);
+    session_cookie_set(cookie, sizeof(cookie), hex, req);
     httpd_resp_set_hdr(req, "Set-Cookie", cookie);
 
     send_simple_page_begin(req, "Password changed");

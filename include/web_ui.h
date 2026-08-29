@@ -151,7 +151,9 @@ static const char *DARK_CSS =
     "var tEl=document.getElementById('temp');" \
     "if(tEl){if(st.temp_c==null||typeof st.temp_c!=='number'){tEl.textContent='—';tEl.style.color='#94a3b8';}" \
     "else{tEl.textContent=st.temp_c.toFixed(1)+' °C';" \
-    "tEl.style.color=st.temp_c>=80?'#ef4444':st.temp_c>=65?'#eab308':'#22c55e';}}" \
+    "tEl.style.color=st.temp_c>=80?'#ef4444':st.temp_c>=65?'#eab308':'#22c55e';}" \
+    "var tm=document.getElementById('tempmax');" \
+    "if(tm){tm.textContent=(typeof st.temp_max_c==='number')?'max '+st.temp_max_c.toFixed(1):'';}}" \
     "var wEl=document.getElementById('wdog');" \
     "if(wEl&&st.watchdog){var w=st.watchdog;" \
     "if(!w.armed){wEl.textContent='Idle';wEl.style.color='#94a3b8';}" \
