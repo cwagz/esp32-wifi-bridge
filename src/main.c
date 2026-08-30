@@ -1201,7 +1201,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         wifi_connected ? "Connected" : "Disconnected");
     httpd_resp_sendstr_chunk(req, buf);
 
-    // Signal strength (with ID for auto-refresh, colored by quality)
+    // Signal strength (4-bar icon + colored RSSI; JS sets bar count)
     if (wifi_connected) {
         const char *sig_color = rssi > -50 ? "#22c55e" : rssi > -60 ? "#84cc16" : rssi > -70 ? "#eab308" : "#ef4444";
         const char *sig_quality = rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak";
