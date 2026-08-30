@@ -25,15 +25,13 @@ Print one of each.
 | Setting | Suggested |
 |---------|-----------|
 | Material | **ASA** (PETG works; ASA is what this was proven on) |
-| Supports | **None** — print in the orientation the STLs already sit |
+| Supports | **None** |
 | Layer | 0.2 mm |
-| Walls | 3–4 |
-| Infill | 20–30% |
-| Nozzle | ~240–260 °C (follow your filament) |
-| Bed | ~90–110 °C |
+| Walls | 4 |
+| Infill | 15% |
 | Chamber | Enclosed printer recommended for ASA (warping) |
 
-Keep the large flat faces on the bed. If the slicer wants to add supports, rotate the part rather than enabling them.
+Keep the large flat faces on the bed.
 
 ## Assembly
 
