@@ -58,6 +58,12 @@ Put the dashboard behind TLS if you want HTTPS: HAProxy (or similar) to `:80`. H
 | INT | 10 |
 | BOOT (hold 15 s) | 0 |
 
+### Printed case
+
+A snap-fit ASA enclosure (no supports) with a wall mount is in [`case/`](case/). Vents are meant for **horizontal** wall install so heat rises through the grille.
+
+![Case](case/photos/04_ethernet.jpg)
+
 ## Features
 
 - SSL/TLS **passthrough** to `192.168.91.1:443` with **TTL 64**
@@ -156,6 +162,7 @@ Tags `v*` build firmware, GitHub Release, and Pages. Flash wear: OTA alternates 
 | `include/config.h` | Compile-time constants |
 | `include/web_ui.h` | CSS / JS / icons |
 | `partitions.csv` | nvs 24 KB, dual 1.75 MB OTA slots |
+| `case/` | ASA enclosure STLs + print notes |
 
 ## License
 
