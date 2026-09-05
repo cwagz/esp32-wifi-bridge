@@ -139,6 +139,9 @@ static const char *DARK_CSS =
     "if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}" \
     "function fmtUptime(s){var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sec=s%60;" \
     "return d+'d '+h+'h '+m+'m '+sec+'s';}" \
+    "function fmtDur(s){s=Math.floor(s||0);if(s<3600)return Math.floor(s/60)+'m';" \
+    "if(s<86400){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return m?h+'h '+m+'m':h+'h';}" \
+    "var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600);return h?d+'d '+h+'h':d+'d';}" \
     "var lastOk=Date.now(),fetching=false,dashDown=false;" \
     "function updAge(){var s=Math.floor((Date.now()-lastOk)/1000);var el=document.getElementById('lastref');" \
     "if(s>30){el.innerHTML='<span style=\"color:#ef4444\">'+s+'s ago (stale)</span>';}else{el.textContent=s+'s ago';}}" \
@@ -267,7 +270,7 @@ static const char *DARK_CSS =
     "var info=document.getElementById('wifiinfo');if(info){" \
     "var csec=d.connected_sec,dsec=d.disconnected_sec,total=csec+dsec;" \
     "var upPct=total>0?Math.round(csec*100/total):0;" \
-    "info.innerHTML='<span>Uptime: '+upPct+'%</span><span>Connected: '+Math.floor(csec/60)+'m</span><span>Disconnected: '+Math.floor(dsec/60)+'m</span>'+" \
+    "info.innerHTML='<span>Uptime: '+upPct+'%</span><span>Connected: '+fmtDur(csec)+'</span><span>Disconnected: '+fmtDur(dsec)+'</span>'+" \
     "(d.time_synced?'<span style=\"color:#22c55e\">NTP synced</span>':'<span style=\"color:#eab308\">NTP pending</span>');}" \
     "}).catch(function(e){console.log('Chart error:',e);});}" \
     "drawWifiChart();setInterval(drawWifiChart,60000);" \
