@@ -1393,9 +1393,10 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
                 wd_color = "#22c55e";
             }
         }
-        snprintf(buf, sizeof(buf),
+        httpd_resp_sendstr_chunk(req,
             "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"var p=document.getElementById('wdcfg');p.style.display=p.style.display==='none'?'block':'none'\">"
-            "<div class=\"label\">Watchdog " ICON_SETTINGS "</div>"
+            "<div class=\"label\">Watchdog " ICON_SETTINGS "</div>");
+        snprintf(buf, sizeof(buf),
             "<div class=\"value\" id=\"wdog\" style=\"color:%s\">%s</div></div></div>",
             wd_color, wd_disp);
         httpd_resp_sendstr_chunk(req, buf);
