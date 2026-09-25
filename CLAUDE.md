@@ -46,7 +46,7 @@ Tagged `v*` releases publish firmware to GitHub Pages. OTA URL is derived from t
 
 - Dual netifs: HTTP clients must use Ethernet (`if_name`) for internet. Pin DNS to the Ethernet snapshot before Wi-Fi associates.
 - HTTP `:80` bind is wrapped (`__wrap_lwip_bind`) to the Ethernet IP; proxy `:443` likewise.
-- Watchdog idle until first successful Powerwall proxy, then `WATCHDOG_TIMEOUT_SEC`.
+- Watchdog: NVS `watchdog` / `mode` (`0` proxy clients, default; `1` Powerwall link). Proxy mode idle until first successful proxy, then `WATCHDOG_TIMEOUT_SEC`. Link mode reboots only if `192.168.91.1:443` stays down that long, after Wi-Fi has associated once. `POST /watchdog/save` does not reboot. BOOT does not clear it.
 - Ethernet static IP in NVS `eth_config`. Apply `esp_netif_dhcpc_stop` + `esp_netif_set_ip_info` before `esp_eth_start`. `force_dhcp` is one-shot. ICMP gateway for `ETH_DHCP_FALLBACK_SEC`; `/api/status` or a proxy success cancels fallback. GPIO0 BOOT 15 s → DHCP + clear admin password.
 - Login is 200 HTML + `Set-Cookie` then JS/`meta` bounce to `/` (not 302). Safari drops cookies on 302-from-POST.
 - Log ring 200 × 160 chars; skip ESP-IDF `httpd*` tags; strip ANSI.
@@ -68,6 +68,7 @@ Waveshare ESP32-S3-POE-ETH. W5500 SPI: MISO=12 MOSI=11 SCLK=13 CS=14 INT=10. Pla
 | `GET /api/requests`, `/api/logs`, `/api/wifi-history` | |
 | `GET /api/update`, `POST /api/check-update`, `POST /api/install-update` | |
 | `GET /wifi/scan`, `POST /wifi/save`, `POST /eth/save` | eth save reboots |
+| `POST /watchdog/save` | `mode=proxy` or `mode=link`, no reboot |
 | `POST /admin/setup` | first boot only |
 | `POST /admin/password`, `POST /ota/upload`, `POST /reboot` | |
 

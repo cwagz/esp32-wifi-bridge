@@ -71,7 +71,7 @@ A snap-fit ASA enclosure (no supports) with a wall mount is in [`case/`](case/).
 - HTTP and proxy **bound to the Ethernet IP only**
 - mDNS `powerwall.local` (`_powerwall._tcp` :443, `_http._tcp` :80)
 - Admin password: salted SHA-256 in NVS, HTML form, session cookie (`HttpOnly; SameSite=Lax`; `Secure` when `X-Forwarded-Proto: https`)
-- Watchdog: idle until the first successful Powerwall proxy, then reboot after 10 min without one
+- Watchdog: **Proxy clients** (default) stays idle until the first successful proxy, then reboots after 10 min without one. **Powerwall link** ignores client traffic and reboots only if the Powerwall stays unreachable for 10 min. Click the Watchdog tile. Saved in NVS. BOOT does not change it.
 - NTP over Ethernet, OTA from GitHub Pages, Ethernet DNS snapshot so Wi-Fi cannot steal OTA DNS
 
 ## Reverse proxy (HAProxy)

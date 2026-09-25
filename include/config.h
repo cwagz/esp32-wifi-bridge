@@ -133,7 +133,8 @@
 #endif
 
 // ===== Connection Watchdog =====
-// Reboot device if no successful proxy connections within this time
+// Proxy-clients mode: reboot if no successful proxy within this time (after the first one).
+// Powerwall-link mode: reboot if the Powerwall stays unreachable for this long.
 #ifndef WATCHDOG_TIMEOUT_SEC
 #define WATCHDOG_TIMEOUT_SEC 600  // 10 minutes
 #endif

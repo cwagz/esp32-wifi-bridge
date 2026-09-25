@@ -70,6 +70,8 @@ static const char *TAG = "wifi-eth-bridge";
 #define NVS_ADMIN_NAMESPACE "admin"
 #define NVS_KEY_ADMIN_SALT "salt"
 #define NVS_KEY_ADMIN_HASH "hash"
+#define NVS_WD_NAMESPACE "watchdog"
+#define NVS_KEY_WD_MODE "mode"
 #define ADMIN_SALT_LEN 16
 #define ADMIN_HASH_LEN 32
 
@@ -103,8 +105,12 @@ static volatile int64_t last_powerwall_check = 0;
 // Boot time for uptime calculation
 static int64_t boot_time_us = 0;
 
-// Connection watchdog timestamp
+// Connection watchdog timestamp (proxy-clients mode)
 static volatile int64_t last_successful_connection_time = 0;
+// false = proxy clients (default). true = Powerwall link.
+static volatile bool wd_link_mode = false;
+static volatile bool wifi_was_up = false;
+static volatile int64_t link_down_since_us = 0;
 
 // Event group for WiFi and Ethernet status
 static EventGroupHandle_t s_event_group;
@@ -1069,6 +1075,13 @@ static void check_powerwall_connectivity(void)
 
     close(sock);
     last_powerwall_check = esp_timer_get_time() / 1000;  // Convert to ms
+    if (wd_link_mode && wifi_was_up) {
+        if (powerwall_reachable) {
+            link_down_since_us = 0;
+        } else if (link_down_since_us == 0) {
+            link_down_since_us = esp_timer_get_time();
+        }
+    }
 }
 
 // ===== OTA Update Handlers =====
@@ -1339,7 +1352,30 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     {
         char wd_disp[40];
         const char *wd_color;
-        if (last_successful_connection_time == 0) {
+        if (wd_link_mode) {
+            if (!wifi_was_up) {
+                snprintf(wd_disp, sizeof(wd_disp), "Idle");
+                wd_color = "#94a3b8";
+            } else if (powerwall_reachable) {
+                snprintf(wd_disp, sizeof(wd_disp), "Link up");
+                wd_color = "#22c55e";
+            } else {
+                int64_t wd_s = link_down_since_us
+                    ? (esp_timer_get_time() - link_down_since_us) / 1000000 : 0;
+                if (wd_s >= 60) {
+                    snprintf(wd_disp, sizeof(wd_disp), "Link down · %lldm", (long long)(wd_s / 60));
+                } else {
+                    snprintf(wd_disp, sizeof(wd_disp), "Link down · %llds", (long long)wd_s);
+                }
+                if (wd_s >= (WATCHDOG_TIMEOUT_SEC * 9) / 10) {
+                    wd_color = "#ef4444";
+                } else if (wd_s >= (WATCHDOG_TIMEOUT_SEC * 3) / 4) {
+                    wd_color = "#eab308";
+                } else {
+                    wd_color = "#22c55e";
+                }
+            }
+        } else if (last_successful_connection_time == 0) {
             snprintf(wd_disp, sizeof(wd_disp), "Idle");
             wd_color = "#94a3b8";
         } else {
@@ -1358,11 +1394,31 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
             }
         }
         snprintf(buf, sizeof(buf),
-            "<div class=\"status-item\"><div class=\"label\">Watchdog</div>"
+            "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"var p=document.getElementById('wdcfg');p.style.display=p.style.display==='none'?'block':'none'\">"
+            "<div class=\"label\">Watchdog " ICON_SETTINGS "</div>"
             "<div class=\"value\" id=\"wdog\" style=\"color:%s\">%s</div></div></div>",
             wd_color, wd_disp);
         httpd_resp_sendstr_chunk(req, buf);
     }
+    httpd_resp_sendstr_chunk(req,
+        "<div id=\"wdcfg\" style=\"display:none\"><hr>"
+        "<form method=\"POST\" action=\"/watchdog/save\">"
+        "<div class=\"form-group\"><label class=\"label\">Watchdog trigger</label>"
+        "<select name=\"mode\" class=\"mt-1\">");
+    snprintf(buf, sizeof(buf),
+        "<option value=\"proxy\"%s>Proxy clients</option>"
+        "<option value=\"link\"%s>Powerwall link</option></select></div>",
+        wd_link_mode ? "" : " selected",
+        wd_link_mode ? " selected" : "");
+    httpd_resp_sendstr_chunk(req, buf);
+    httpd_resp_sendstr_chunk(req,
+        "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">"
+        "Proxy clients reboots after 10 minutes with no proxied client. "
+        "Powerwall link reboots only if the Powerwall stays unreachable for 10 minutes. "
+        "Client traffic is ignored. Use Powerwall link when another path reaches the gateway "
+        "and this bridge is only a fallback.</p>"
+        "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save</button>"
+        "</form></div>");
     httpd_resp_sendstr_chunk(req,
         "<hr><div class=\"flex\" style=\"gap:0.5rem;flex-wrap:wrap\">"
         "<form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
@@ -1963,6 +2019,73 @@ static esp_err_t eth_save_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static void load_wd_config(void)
+{
+    nvs_handle_t h;
+    uint8_t mode = 0;
+    wd_link_mode = false;
+    if (nvs_open(NVS_WD_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    if (nvs_get_u8(h, NVS_KEY_WD_MODE, &mode) == ESP_OK) {
+        wd_link_mode = (mode == 1);
+    }
+    nvs_close(h);
+    ESP_LOGI(TAG, "Watchdog trigger: %s", wd_link_mode ? "Powerwall link" : "Proxy clients");
+}
+
+/** Watchdog trigger — no reboot. mode=proxy (default) or mode=link. */
+static esp_err_t watchdog_save_handler(httpd_req_t *req)
+{
+    char content[64];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    content[received] = '\0';
+
+    char mode[16] = {0};
+    form_get(content, "mode", mode, sizeof(mode));
+    bool link = (strcmp(mode, "link") == 0);
+    if (!link && strcmp(mode, "proxy") != 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown watchdog mode");
+        return ESP_FAIL;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_WD_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_WD_MODE, link ? 1 : 0);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    wd_link_mode = link;
+    link_down_since_us = 0;
+    if (!link) {
+        /* Fresh window. Do not reboot because the last proxy was long ago. */
+        last_successful_connection_time = 0;
+    }
+    ESP_LOGI(TAG, "Watchdog trigger set to %s", link ? "Powerwall link" : "Proxy clients");
+
+    const char *response =
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+        "<meta http-equiv=\"refresh\" content=\"0;url=/\">"
+        "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;"
+        "display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}</style>"
+        "</head><body><p>Saved. Returning to the dashboard.</p></body></html>";
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, response, strlen(response));
+    return ESP_OK;
+}
+
 /** API endpoint for status JSON */
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
@@ -2025,23 +2148,36 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         snprintf(temp_max_json, sizeof(temp_max_json), "null");
     }
 
-    bool wd_armed = last_successful_connection_time != 0;
+    bool wd_armed;
     char wd_last[16];
-    if (wd_armed) {
-        snprintf(wd_last, sizeof(wd_last), "%lld",
-                 (long long)((esp_timer_get_time() - last_successful_connection_time) / 1000000));
+    bool wd_link_up = false;
+    if (wd_link_mode) {
+        wd_armed = wifi_was_up;
+        wd_link_up = wifi_was_up && powerwall_reachable;
+        if (wd_armed && !wd_link_up && link_down_since_us != 0) {
+            snprintf(wd_last, sizeof(wd_last), "%lld",
+                     (long long)((esp_timer_get_time() - link_down_since_us) / 1000000));
+        } else {
+            snprintf(wd_last, sizeof(wd_last), "0");
+        }
     } else {
-        snprintf(wd_last, sizeof(wd_last), "null");
+        wd_armed = last_successful_connection_time != 0;
+        if (wd_armed) {
+            snprintf(wd_last, sizeof(wd_last), "%lld",
+                     (long long)((esp_timer_get_time() - last_successful_connection_time) / 1000000));
+        } else {
+            snprintf(wd_last, sizeof(wd_last), "null");
+        }
     }
 
-    char response[896];
+    char response[1024];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
         "\"eth\":{\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
         "\"mode\":\"%s\",\"fallback\":%s},"
         "\"cpu\":%u,\"temp_c\":%s,\"temp_max_c\":%s,\"heap\":%lu,"
-        "\"watchdog\":{\"armed\":%s,\"last_s\":%s,\"timeout_s\":%d},"
+        "\"watchdog\":{\"mode\":\"%s\",\"armed\":%s,\"link_up\":%s,\"last_s\":%s,\"timeout_s\":%d},"
         "\"uptime\":%lld,"
         "\"total_bytes_in\":%llu,\"total_bytes_out\":%llu,"
         "\"total_requests\":%lu,\"successful_requests\":%lu,\"failed_requests\":%lu}",
@@ -2056,7 +2192,9 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         temp_json,
         temp_max_json,
         (unsigned long)esp_get_free_heap_size(),
+        wd_link_mode ? "link" : "proxy",
         wd_armed ? "true" : "false",
+        wd_link_up ? "true" : "false",
         wd_last,
         WATCHDOG_TIMEOUT_SEC,
         (long long)uptime_sec,
@@ -2778,6 +2916,7 @@ static esp_err_t start_http_server(void)
     AUTH_URI("/wifi/scan", HTTP_GET, wifi_scan_handler);
     AUTH_URI("/wifi/save", HTTP_POST, wifi_save_handler);
     AUTH_URI("/eth/save", HTTP_POST, eth_save_handler);
+    AUTH_URI("/watchdog/save", HTTP_POST, watchdog_save_handler);
     AUTH_URI("/api/status", HTTP_GET, api_status_handler);
     AUTH_URI("/api/rssi", HTTP_GET, api_rssi_handler);
     AUTH_URI("/api/requests", HTTP_GET, api_requests_handler);
@@ -2914,6 +3053,7 @@ static void wifi_got_ip_handler(void *arg, esp_event_base_t event_base,
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(TAG, "WiFi got IP:" IPSTR, IP2STR(&event->ip_info.ip));
     xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
+    wifi_was_up = true;
     /* Tesla DHCP just overwrote lwIP DNS with 192.168.91.1. Put LAN DNS back. */
     remote_ota_apply_eth_dns();
 }
@@ -2935,6 +3075,7 @@ static esp_err_t init_ethernet(void)
     eth_netif = esp_netif_new(&cfg);
 
     load_eth_config();
+    load_wd_config();
 
     // Stop DHCP before the interface comes up if we will use a static address
     if (eth_cfg.use_static && !eth_cfg.using_fallback) {
@@ -3223,14 +3364,45 @@ static void system_monitor_task(void *pvParameters)
     }
 }
 
-/** Connection watchdog — armed only after the first successful Powerwall proxy */
+/** Connection watchdog. Proxy clients: idle until the first successful proxy.
+ *  Powerwall link: reboot only if 192.168.91.1:443 stays unreachable. */
 static void connection_watchdog_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Connection watchdog idle until first successful Powerwall proxy (then %d s)",
+    ESP_LOGI(TAG, "Connection watchdog: %s (%d s)",
+             wd_link_mode ? "Powerwall link" : "Proxy clients",
              WATCHDOG_TIMEOUT_SEC);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(WATCHDOG_CHECK_INTERVAL_SEC * 1000));
+
+        if (wd_link_mode) {
+            if (!wifi_was_up) {
+                static int idle_logs = 0;
+                if ((++idle_logs % 5) == 0) {
+                    ESP_LOGI(TAG, "Watchdog still idle — Wi-Fi has not associated yet");
+                }
+                continue;
+            }
+            check_powerwall_connectivity();
+            if (powerwall_reachable) {
+                static int up_logs = 0;
+                if ((++up_logs % 5) == 0) {
+                    ESP_LOGI(TAG, "Watchdog: Powerwall link up");
+                }
+                continue;
+            }
+            int64_t elapsed_sec = link_down_since_us
+                ? (esp_timer_get_time() - link_down_since_us) / 1000000 : 0;
+            if (elapsed_sec > WATCHDOG_TIMEOUT_SEC) {
+                ESP_LOGE(TAG, "Watchdog triggered: Powerwall unreachable for %lld seconds",
+                         (long long)elapsed_sec);
+                ESP_LOGW(TAG, "Rebooting device...");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                esp_restart();
+            }
+            ESP_LOGW(TAG, "Watchdog: Powerwall unreachable for %lld seconds", (long long)elapsed_sec);
+            continue;
+        }
 
         if (last_successful_connection_time == 0) {
             static int idle_logs = 0;
@@ -3379,7 +3551,7 @@ void app_main(void)
     xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
 
     // Start connection watchdog task
-    xTaskCreate(connection_watchdog_task, "conn_watchdog", 3072, NULL, 3, NULL);
+    xTaskCreate(connection_watchdog_task, "conn_watchdog", 4096, NULL, 3, NULL);
 
     // Start WiFi-dependent services in background task
     // This allows OTA to remain responsive while waiting for WiFi
