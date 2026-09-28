@@ -141,6 +141,11 @@
 #ifndef WATCHDOG_CHECK_INTERVAL_SEC
 #define WATCHDOG_CHECK_INTERVAL_SEC 60  // Check every minute
 #endif
+// Powerwall-link mode only. TCP probe of 192.168.91.1:443.
+// Dashboard refresh reuses the last result until this age.
+#ifndef WATCHDOG_LINK_PROBE_SEC
+#define WATCHDOG_LINK_PROBE_SEC 300  // 5 minutes
+#endif
 
 // ===== Debug Configuration =====
 // Enable DEBUG_MODE to show encrypted packet forwarding details

@@ -1032,6 +1032,19 @@ static void eth_boot_button_task(void *pvParameters)
 
 // ===== Powerwall Connectivity Check =====
 
+/** Link mode probes slowly. Proxy mode keeps the live 5 s tile while the page is open. */
+static bool powerwall_check_due(void)
+{
+    if (last_powerwall_check == 0) {
+        return true;
+    }
+    int64_t age_ms = (esp_timer_get_time() / 1000) - last_powerwall_check;
+    int64_t limit_ms = wd_link_mode
+        ? (int64_t)WATCHDOG_LINK_PROBE_SEC * 1000
+        : 5000;
+    return age_ms >= limit_ms;
+}
+
 /** Check if Powerwall is reachable (non-blocking TCP connect test) */
 static void check_powerwall_connectivity(void)
 {
@@ -1144,8 +1157,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     }
 
     // Check Powerwall connectivity (rate-limited)
-    int64_t now = esp_timer_get_time() / 1000;
-    if (now - last_powerwall_check > 5000 || last_powerwall_check == 0) {
+    if (powerwall_check_due()) {
         check_powerwall_connectivity();
     }
 
@@ -2101,9 +2113,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         rssi = ap_info.rssi;
     }
 
-    // Check Powerwall
-    int64_t now_ms = esp_timer_get_time() / 1000;
-    if (now_ms - last_powerwall_check > 5000) {
+    // Check Powerwall (link mode reuses a result for WATCHDOG_LINK_PROBE_SEC)
+    if (powerwall_check_due()) {
         check_powerwall_connectivity();
     }
 
@@ -3384,7 +3395,10 @@ static void connection_watchdog_task(void *pvParameters)
                 }
                 continue;
             }
-            check_powerwall_connectivity();
+            bool probed = powerwall_check_due();
+            if (probed) {
+                check_powerwall_connectivity();
+            }
             if (powerwall_reachable) {
                 static int up_logs = 0;
                 if ((++up_logs % 5) == 0) {
@@ -3395,13 +3409,22 @@ static void connection_watchdog_task(void *pvParameters)
             int64_t elapsed_sec = link_down_since_us
                 ? (esp_timer_get_time() - link_down_since_us) / 1000000 : 0;
             if (elapsed_sec > WATCHDOG_TIMEOUT_SEC) {
+                check_powerwall_connectivity();
+                if (powerwall_reachable) {
+                    ESP_LOGI(TAG, "Watchdog: Powerwall link recovered before reboot");
+                    continue;
+                }
+                elapsed_sec = link_down_since_us
+                    ? (esp_timer_get_time() - link_down_since_us) / 1000000 : 0;
                 ESP_LOGE(TAG, "Watchdog triggered: Powerwall unreachable for %lld seconds",
                          (long long)elapsed_sec);
                 ESP_LOGW(TAG, "Rebooting device...");
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 esp_restart();
             }
-            ESP_LOGW(TAG, "Watchdog: Powerwall unreachable for %lld seconds", (long long)elapsed_sec);
+            if (probed) {
+                ESP_LOGW(TAG, "Watchdog: Powerwall unreachable for %lld seconds", (long long)elapsed_sec);
+            }
             continue;
         }
 
